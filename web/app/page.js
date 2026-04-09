@@ -263,6 +263,9 @@ export default function GhostPage() {
 
       setNotification(`${data.site} — found ${data.media.length} file(s)`);
 
+      /* build folder-safe title prefix for per-URL organization */
+      const folderName = (data.title || 'ghost_download').replace(/[<>:"/\\|?*\n\r\t]/g, '_').replace(/\s+/g, ' ').trim().substring(0, 100);
+
       /* init file list */
       const initFiles = data.media.map(m => ({ filename: m.filename, status: 'queued', size: null }));
       setFiles(initFiles);
@@ -287,13 +290,13 @@ export default function GhostPage() {
             referer: data.referer || '',
             auth: data.authHeader || '',
             dl: '1',
-            filename: item.filename,
+            filename: `${folderName}_${item.filename}`,
           });
 
           try {
             const a = document.createElement('a');
             a.href = '/api/proxy?' + params.toString();
-            a.download = item.filename;
+            a.download = `${folderName}_${item.filename}`;
             a.style.display = 'none';
             document.body.appendChild(a);
             a.click();
@@ -374,7 +377,8 @@ export default function GhostPage() {
 
       const JSZip = (await import('jszip')).default;
       const zip = new JSZip();
-      for (const b of successBlobs) zip.file(b.name, b.blob);
+      const folder = zip.folder(folderName);
+      for (const b of successBlobs) folder.file(b.name, b.blob);
 
       const zipBlob = await zip.generateAsync({
         type: 'blob',

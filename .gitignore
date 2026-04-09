@@ -10,9 +10,10 @@ node_modules/
 .next/
 out/
 
-# Downloads
+# Data
 downloads/
 tmp_downloads/
+backend/data/
 
 # OS
 .DS_Store

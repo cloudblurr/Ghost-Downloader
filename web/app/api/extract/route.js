@@ -6,6 +6,31 @@ export const maxDuration = 60;
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 
+/* ── Adjective-Animal unique name generator for images ── */
+const ADJECTIVES = [
+  'amber','blazing','coral','dusk','ember','frosty','golden','hazy','ivory','jade',
+  'keen','lunar','misty','neon','opal','plush','quiet','rosy','silk','tidal',
+  'ultra','vivid','warm','xenon','young','zinc','ashen','bold','crisp','deep',
+  'epic','faded','grim','holo','iced','jet','knit','lush','matte','nova',
+  'onyx','pale','raw','sheer','thin','vim','wild','aqua','blaze','cyan',
+  'dew','ebon','fine','glow','hued','inky','jolt','kind','lime','mood',
+];
+const ANIMALS = [
+  'fox','owl','lynx','wolf','bear','hawk','crow','dove','frog','moth',
+  'orca','puma','raven','swan','viper','wren','yak','asp','bat','cat',
+  'deer','elk','finch','goat','hare','ibis','jay','koi','lark','mink',
+  'newt','ocelot','pike','quail','ray','seal','tern','urial','vole','wasp',
+  'axis','boa','colt','dace','eel','fawn','gull','heron','iguana','jackal',
+  'kudu','lion','mare','narwhal','osprey','parrot','robin','stork','toad','urchin',
+];
+let _nameIdx = 0;
+function adjAnimal() {
+  const a = ADJECTIVES[_nameIdx % ADJECTIVES.length];
+  const b = ANIMALS[_nameIdx % ANIMALS.length];
+  _nameIdx++;
+  return `${a}-${b}`;
+}
+
 function extFrom(u, fallback) {
   try {
     const p = new URL(u.split('?')[0]).pathname;
@@ -65,7 +90,7 @@ async function extractErome(url) {
   return {
     site: 'Erome', title, referer: url,
     media: [
-      ...[...images].sort().map((u, i) => ({ url: u, type: 'image', filename: `img_${String(i + 1).padStart(3, '0')}${extFrom(u, '.jpg')}` })),
+      ...[...images].sort().map((u) => ({ url: u, type: 'image', filename: `${adjAnimal()}${extFrom(u, '.jpg')}` })),
       ...[...videos].sort().map((u, i) => ({ url: u, type: 'video', filename: `vid_${String(i + 1).padStart(3, '0')}${extFrom(u, '.mp4')}` })),
     ],
   };
@@ -137,7 +162,7 @@ async function extractBunkr(url) {
   const urls = new Set();
   $('a[href]').each((_, el) => { try { const h = new URL($(el).attr('href'), url).href; if (new URL(h).hostname.match(/cdn|media-files/)) urls.add(h); } catch {} });
   $('video source, video[src], img[src]').each((_, el) => { const s = $(el).attr('src') || $(el).attr('data-src'); if (s && /\.(mp4|jpg|jpeg|png|gif|webm)/i.test(s)) urls.add(new URL(s, url).href); });
-  return { site: 'Bunkr', title: sanitize(title), referer: url, media: [...urls].sort().map((u, i) => ({ url: u, type: /\.(mp4|webm|mkv)/i.test(u) ? 'video' : 'image', filename: decodeURIComponent(new URL(u).pathname.split('/').pop()) || `file_${i + 1}` })) };
+  return { site: 'Bunkr', title: sanitize(title), referer: url, media: [...urls].sort().map((u) => ({ url: u, type: /\.(mp4|webm|mkv)/i.test(u) ? 'video' : 'image', filename: decodeURIComponent(new URL(u).pathname.split('/').pop()) || `${adjAnimal()}${extFrom(u, '.bin')}` })) };
 }
 
 // ── Cyberdrop ──
@@ -148,7 +173,7 @@ async function extractCyberdrop(url) {
   const urls = new Set();
   $('a.image[href]').each((_, el) => urls.add($(el).attr('href')));
   $('a[href]').each((_, el) => { const h = $(el).attr('href'); if (h && (h.includes('fs-') || h.includes('.cyberdrop.')) && /\.(mp4|jpg|png|gif|webm|mkv)/i.test(h)) urls.add(h); });
-  return { site: 'Cyberdrop', title: sanitize(title), referer: url, media: [...urls].sort().map((u, i) => ({ url: u, type: /\.(mp4|webm|mkv|mov)/i.test(u) ? 'video' : 'image', filename: decodeURIComponent(new URL(u).pathname.split('/').pop()) || `file_${i + 1}` })) };
+  return { site: 'Cyberdrop', title: sanitize(title), referer: url, media: [...urls].sort().map((u) => ({ url: u, type: /\.(mp4|webm|mkv|mov)/i.test(u) ? 'video' : 'image', filename: decodeURIComponent(new URL(u).pathname.split('/').pop()) || `${adjAnimal()}${extFrom(u, '.bin')}` })) };
 }
 
 // ── Twitter / X ──
@@ -312,7 +337,7 @@ async function extractGeneric(url) {
   (html.match(/https?:\/\/[^\s"'<>]+\.(?:mp4|webm|mkv|mov)/g) || []).forEach(u => urls.add(u));
 
   const host = new URL(url).hostname.replace('www.', '');
-  return { site: 'Generic', title: sanitize(host), referer: url, media: [...urls].sort().map((u, i) => ({ url: u, type: /\.(mp4|webm|mkv|mov|avi|m4v|flv|wmv)/i.test(u) ? 'video' : 'image', filename: decodeURIComponent(new URL(u).pathname.split('/').pop()) || `file_${i + 1}` })) };
+  return { site: 'Generic', title: sanitize(host), referer: url, media: [...urls].sort().map((u) => ({ url: u, type: /\.(mp4|webm|mkv|mov|avi|m4v|flv|wmv)/i.test(u) ? 'video' : 'image', filename: decodeURIComponent(new URL(u).pathname.split('/').pop()) || `${adjAnimal()}${extFrom(u, '.bin')}` })) };
 }
 
 // ── Router ──
@@ -332,6 +357,7 @@ function getExtractor(url) {
 
 export async function POST(req) {
   try {
+    _nameIdx = 0; // reset per request
     const { url } = await req.json();
     if (!url || !/^https?:\/\//.test(url)) return NextResponse.json({ error: 'Invalid URL' }, { status: 400 });
     const result = await getExtractor(url)(url);
