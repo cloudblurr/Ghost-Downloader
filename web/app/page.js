@@ -1,236 +1,119 @@
 'use client';
-import { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 
-export default function Home() {
-  const [url, setUrl] = useState('');
-  const [status, setStatus] = useState('idle'); // idle | extracting | downloading | done | error
-  const [logs, setLogs] = useState([]);
-  const [progress, setProgress] = useState(0);
-  const [result, setResult] = useState(null);
-  const abortRef = useRef(null);
+var S = {
+  page: { fontFamily: "-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif", background: '#0a0a0f', color: '#e4e4e7', minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', margin: 0 },
+  container: { width: '100%', maxWidth: 640, padding: 20, marginTop: 60 },
+  logo: { textAlign: 'center', marginBottom: 40 },
+  h1: { fontSize: '2.2rem', fontWeight: 700, background: 'linear-gradient(135deg,#7c3aed,#a78bfa,#7c3aed)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', backgroundClip: 'text', margin: 0 },
+  sub: { color: '#71717a', fontSize: '0.85rem', marginTop: 6 },
+  form: { display: 'flex', gap: 10, marginBottom: 20 },
+  input: { flex: 1, padding: '14px 18px', background: '#12121a', border: '1px solid #2a2a3a', borderRadius: 12, color: '#e4e4e7', fontSize: '0.95rem', outline: 'none' },
+  btn: { padding: '14px 28px', background: '#7c3aed', border: 'none', borderRadius: 12, color: 'white', fontSize: '0.95rem', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' },
+  tags: { display: 'flex', flexWrap: 'wrap', gap: 6, justifyContent: 'center', marginBottom: 30 },
+  tag: { padding: '4px 12px', background: '#1a1a26', border: '1px solid #2a2a3a', borderRadius: 20, fontSize: '0.75rem', color: '#71717a' },
+  panel: { background: '#12121a', border: '1px solid #2a2a3a', borderRadius: 12, padding: 24, marginBottom: 20 },
+  barWrap: { width: '100%', height: 6, background: '#1a1a26', borderRadius: 3, overflow: 'hidden', marginBottom: 16 },
+  bar: { height: '100%', background: 'linear-gradient(90deg,#7c3aed,#a78bfa)', borderRadius: 3, transition: 'width 0.3s' },
+  logBox: { background: '#0a0a0f', border: '1px solid #2a2a3a', borderRadius: 8, padding: '12px 14px', maxHeight: 280, overflowY: 'auto', fontFamily: "'SF Mono','Cascadia Code','Fira Code',monospace", fontSize: '0.78rem', lineHeight: '1.7' },
+};
+
+var LC = { info: '#60a5fa', found: '#22c55e', dl: '#71717a', error: '#ef4444', done: '#22c55e' };
+var LP = { info: '\u25CF', found: '\u2726', dl: '\u2193', error: '\u2717', done: '\u2713' };
+var SITES = ['Erome', 'RedGifs', 'Imgur', 'Bunkr', 'Cyberdrop', 'Any URL'];
+
+export default function GhostPage() {
+  var _url = useState(''), url = _url[0], setUrl = _url[1];
+  var _st = useState('idle'), status = _st[0], setStatus = _st[1];
+  var _lg = useState([]), logs = _lg[0], setLogs = _lg[1];
+  var _pr = useState(0), progress = _pr[0], setProgress = _pr[1];
+  var _rs = useState(null), result = _rs[0], setResult = _rs[1];
+  var abortRef = useRef(null);
+  var logRef = useRef(null);
+
+  useEffect(function() {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [logs]);
 
   function addLog(type, msg) {
-    setLogs(prev => [...prev, { type, msg, ts: Date.now() }]);
+    setLogs(function(p) { return p.concat([{ type: type, msg: msg }]); });
   }
 
   async function handleSubmit(e) {
-    e?.preventDefault();
+    if (e) e.preventDefault();
     if (!url.trim()) return;
-
-    setStatus('extracting');
-    setLogs([]);
-    setProgress(0);
-    setResult(null);
+    setStatus('extracting'); setLogs([]); setProgress(0); setResult(null);
     addLog('info', 'Extracting media URLs...');
-
     try {
-      const resp = await fetch('/api/extract', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: url.trim() }),
-      });
-      const data = await resp.json();
-
-      if (data.error) {
-        addLog('error', data.error);
-        setStatus('error');
-        return;
-      }
-
-      addLog('found', `${data.site} — Found ${data.media.length} files`);
-
-      if (data.media.length === 0) {
-        addLog('error', 'No media found on this page');
-        setStatus('error');
-        return;
-      }
-
-      // Download all files in browser
+      var resp = await fetch('/api/extract', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: url.trim() }) });
+      var data = await resp.json();
+      if (data.error) { addLog('error', data.error); setStatus('error'); return; }
+      addLog('found', data.site + ' - found ' + data.media.length + ' file(s)');
+      if (data.media.length === 0) { addLog('error', 'No media found'); setStatus('error'); return; }
       setStatus('downloading');
-      const controller = new AbortController();
+      var controller = new AbortController();
       abortRef.current = controller;
-
-      const files = [];
-      let done = 0;
-
-      for (const item of data.media) {
+      var blobs = [], done = 0;
+      for (var i = 0; i < data.media.length; i++) {
+        var item = data.media[i];
         if (controller.signal.aborted) break;
-
-        addLog('dl', `${item.filename}`);
+        addLog('dl', item.filename);
         try {
-          // Use our proxy endpoint to avoid CORS
-          const fileResp = await fetch('/api/proxy?' + new URLSearchParams({
-            url: item.url,
-            referer: data.referer || '',
-            auth: data.authHeader || '',
-          }), { signal: controller.signal });
-
-          if (!fileResp.ok) throw new Error(`HTTP ${fileResp.status}`);
-
-          const blob = await fileResp.blob();
-          files.push({ name: item.filename, blob });
-        } catch (err) {
-          if (err.name === 'AbortError') break;
-          addLog('error', `Failed: ${item.filename} — ${err.message}`);
-        }
+          var params = new URLSearchParams({ url: item.url, referer: data.referer || '', auth: data.authHeader || '' });
+          var r = await fetch('/api/proxy?' + params.toString(), { signal: controller.signal });
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          blobs.push({ name: item.filename, blob: await r.blob() });
+        } catch (err) { if (err.name === 'AbortError') break; addLog('error', 'Failed: ' + item.filename); }
         done++;
         setProgress(Math.round((done / data.media.length) * 100));
       }
-
-      if (controller.signal.aborted) {
-        addLog('info', 'Cancelled');
-        setStatus('idle');
-        return;
-      }
-
-      // Create ZIP using JSZip (loaded from CDN)
+      if (controller.signal.aborted) { addLog('info', 'Cancelled'); setStatus('idle'); return; }
       addLog('info', 'Creating ZIP...');
-      const JSZip = (await import('jszip')).default;
-      const zip = new JSZip();
-      for (const f of files) {
-        zip.file(f.name, f.blob);
-      }
-      const zipBlob = await zip.generateAsync({ type: 'blob' });
-
-      // Trigger download
-      const a = document.createElement('a');
+      var JSZip = (await import('jszip')).default;
+      var zip = new JSZip();
+      for (var j = 0; j < blobs.length; j++) zip.file(blobs[j].name, blobs[j].blob);
+      var zipBlob = await zip.generateAsync({ type: 'blob' });
+      var a = document.createElement('a');
       a.href = URL.createObjectURL(zipBlob);
-      a.download = `${data.title || 'ghost_download'}.zip`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
+      a.download = (data.title || 'ghost_download') + '.zip';
+      document.body.appendChild(a); a.click(); a.remove();
       URL.revokeObjectURL(a.href);
-
-      setResult({ success: files.length, failed: data.media.length - files.length });
-      addLog('done', `Downloaded ${files.length}/${data.media.length} files`);
+      setResult({ ok: blobs.length, fail: data.media.length - blobs.length });
+      addLog('done', 'Done - ' + blobs.length + '/' + data.media.length + ' files');
       setStatus('done');
-
-    } catch (err) {
-      addLog('error', err.message);
-      setStatus('error');
-    }
+    } catch (err) { addLog('error', err.message); setStatus('error'); }
   }
 
-  function handleCancel() {
-    if (abortRef.current) abortRef.current.abort();
-  }
+  var working = status === 'extracting' || status === 'downloading';
+  var statusText = status === 'extracting' ? 'Extracting...' : status === 'downloading' ? 'Downloading ' + progress + '%' : status === 'done' ? 'Complete' : status === 'error' ? 'Error' : '';
+  var statusColor = status === 'done' ? '#22c55e' : status === 'error' ? '#ef4444' : '#71717a';
 
-  const isWorking = status === 'extracting' || status === 'downloading';
-
-  return (
-    <>
-      <style>{`
-        :root {
-          --bg: #0a0a0f; --surface: #12121a; --surface2: #1a1a26;
-          --border: #2a2a3a; --accent: #7c3aed; --accent-hover: #6d28d9;
-          --accent-glow: rgba(124,58,237,0.3); --green: #22c55e; --red: #ef4444;
-          --yellow: #eab308; --text: #e4e4e7; --text-dim: #71717a; --radius: 12px;
-        }
-        * { margin:0; padding:0; box-sizing:border-box; }
-        body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif; background:var(--bg); color:var(--text); min-height:100vh; display:flex; flex-direction:column; align-items:center; }
-        .container { width:100%; max-width:640px; padding:20px; margin-top:60px; }
-        .logo { text-align:center; margin-bottom:40px; }
-        .logo h1 { font-size:2.2rem; font-weight:700; letter-spacing:-0.5px; background:linear-gradient(135deg,#7c3aed,#a78bfa,#7c3aed); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; }
-        .logo p { color:var(--text-dim); font-size:0.85rem; margin-top:6px; }
-        form { display:flex; gap:10px; margin-bottom:20px; }
-        form input { flex:1; padding:14px 18px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); color:var(--text); font-size:0.95rem; outline:none; transition:border-color 0.2s,box-shadow 0.2s; }
-        form input:focus { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-glow); }
-        form input::placeholder { color:var(--text-dim); }
-        .btn { padding:14px 28px; background:var(--accent); border:none; border-radius:var(--radius); color:white; font-size:0.95rem; font-weight:600; cursor:pointer; transition:background 0.2s,transform 0.1s; white-space:nowrap; }
-        .btn:hover { background:var(--accent-hover); }
-        .btn:active { transform:scale(0.97); }
-        .btn:disabled { opacity:0.5; cursor:not-allowed; }
-        .btn-cancel { background:var(--red); }
-        .btn-cancel:hover { background:#dc2626; }
-        .sites { display:flex; flex-wrap:wrap; gap:6px; justify-content:center; margin-bottom:30px; }
-        .sites span { padding:4px 12px; background:var(--surface2); border:1px solid var(--border); border-radius:20px; font-size:0.75rem; color:var(--text-dim); }
-        .panel { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:24px; margin-bottom:20px; }
-        .progress-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; }
-        .status { font-size:0.85rem; color:var(--text-dim); }
-        .status.ok { color:var(--green); }
-        .status.err { color:var(--red); }
-        .bar-wrap { width:100%; height:6px; background:var(--surface2); border-radius:3px; overflow:hidden; margin-bottom:16px; }
-        .bar { height:100%; background:linear-gradient(90deg,var(--accent),#a78bfa); border-radius:3px; transition:width 0.3s; }
-        .log-box { background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:12px 14px; max-height:280px; overflow-y:auto; font-family:'SF Mono','Cascadia Code','Fira Code',monospace; font-size:0.78rem; line-height:1.7; }
-        .log-box::-webkit-scrollbar { width:4px; }
-        .log-box::-webkit-scrollbar-thumb { background:var(--border); border-radius:2px; }
-        .log-line { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-        .log-line.info { color:#60a5fa; }
-        .log-line.found { color:var(--green); }
-        .log-line.dl { color:var(--text-dim); }
-        .log-line.error { color:var(--red); }
-        .log-line.done { color:var(--green); font-weight:600; }
-        .spinner { display:inline-block; width:14px; height:14px; border:2px solid rgba(255,255,255,0.3); border-top-color:white; border-radius:50%; animation:spin 0.7s linear infinite; vertical-align:middle; margin-right:6px; }
-        @keyframes spin { to { transform:rotate(360deg); } }
-        footer { margin-top:auto; padding:30px; text-align:center; font-size:0.75rem; color:var(--text-dim); }
-        @media (max-width:480px) { .container { margin-top:30px; padding:12px; } .logo h1 { font-size:1.6rem; } form { flex-direction:column; } .btn { width:100%; } }
-      `}</style>
-
-      <div className="container">
-        <div className="logo">
-          <h1>👻 Ghost</h1>
-          <p>Paste a link. Get the media. Any device.</p>
-        </div>
-
-        <form onSubmit={handleSubmit}>
-          <input
-            type="url"
-            placeholder="Paste URL here..."
-            value={url}
-            onChange={e => setUrl(e.target.value)}
-            disabled={isWorking}
-            autoFocus
-          />
-          {isWorking ? (
-            <button type="button" className="btn btn-cancel" onClick={handleCancel}>Cancel</button>
-          ) : (
-            <button type="submit" className="btn" disabled={!url.trim()}>Download</button>
-          )}
-        </form>
-
-        <div className="sites">
-          <span>Erome</span>
-          <span>RedGifs</span>
-          <span>Imgur</span>
-          <span>Bunkr</span>
-          <span>Cyberdrop</span>
-          <span>Any URL</span>
-        </div>
-
-        {logs.length > 0 && (
-          <div className="panel">
-            <div className="progress-header">
-              <span className={`status ${status === 'done' ? 'ok' : status === 'error' ? 'err' : ''}`}>
-                {status === 'extracting' && <><span className="spinner" />Extracting...</>}
-                {status === 'downloading' && <><span className="spinner" />Downloading {progress}%</>}
-                {status === 'done' && '✓ Complete'}
-                {status === 'error' && '✗ Error'}
-              </span>
-            </div>
-            <div className="bar-wrap">
-              <div className="bar" style={{ width: `${progress}%` }} />
-            </div>
-            <div className="log-box" ref={el => { if (el) el.scrollTop = el.scrollHeight; }}>
-              {logs.map((l, i) => (
-                <div key={i} className={`log-line ${l.type}`}>
-                  {l.type === 'info' && `● ${l.msg}`}
-                  {l.type === 'found' && `✦ ${l.msg}`}
-                  {l.type === 'dl' && `↓ ${l.msg}`}
-                  {l.type === 'error' && `✗ ${l.msg}`}
-                  {l.type === 'done' && `✓ ${l.msg}`}
-                </div>
-              ))}
-            </div>
-            {result && (
-              <div style={{ textAlign:'center', marginTop:12, fontSize:'0.85rem', color:'var(--text-dim)' }}>
-                <span style={{ color:'var(--green)', fontWeight:600 }}>{result.success} downloaded</span>
-                {result.failed > 0 && <> · <span style={{ color:'var(--red)', fontWeight:600 }}>{result.failed} failed</span></>}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-      <footer>Ghost Downloader — deploys on Vercel, downloads to your device.</footer>
-    </>
+  return React.createElement('div', { style: S.page },
+    React.createElement('div', { style: S.container },
+      React.createElement('div', { style: S.logo },
+        React.createElement('h1', { style: S.h1 }, 'Ghost'),
+        React.createElement('p', { style: S.sub }, 'Paste a link. Get the media. Any device.')
+      ),
+      React.createElement('form', { onSubmit: handleSubmit, style: S.form },
+        React.createElement('input', { type: 'url', placeholder: 'Paste URL here...', value: url, onChange: function(e) { setUrl(e.target.value); }, disabled: working, autoFocus: true, style: S.input }),
+        working
+          ? React.createElement('button', { type: 'button', onClick: function() { if (abortRef.current) abortRef.current.abort(); }, style: Object.assign({}, S.btn, { background: '#ef4444' }) }, 'Cancel')
+          : React.createElement('button', { type: 'submit', disabled: !url.trim(), style: S.btn }, 'Download')
+      ),
+      React.createElement('div', { style: S.tags }, SITES.map(function(s) { return React.createElement('span', { key: s, style: S.tag }, s); })),
+      logs.length > 0 ? React.createElement('div', { style: S.panel },
+        React.createElement('div', { style: { marginBottom: 14, fontSize: '0.85rem', color: statusColor } }, statusText),
+        React.createElement('div', { style: S.barWrap }, React.createElement('div', { style: Object.assign({}, S.bar, { width: progress + '%' }) })),
+        React.createElement('div', { ref: logRef, style: S.logBox },
+          logs.map(function(l, i) {
+            return React.createElement('div', { key: i, style: { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: LC[l.type] || '#e4e4e7' } }, (LP[l.type] || ' ') + ' ' + l.msg);
+          })
+        ),
+        result ? React.createElement('div', { style: { textAlign: 'center', marginTop: 12, fontSize: '0.85rem', color: '#71717a' } },
+          React.createElement('span', { style: { color: '#22c55e', fontWeight: 600 } }, result.ok + ' downloaded'),
+          result.fail > 0 ? React.createElement('span', null, ' | ', React.createElement('span', { style: { color: '#ef4444', fontWeight: 600 } }, result.fail + ' failed')) : null
+        ) : null
+      ) : null
+    )
   );
 }
