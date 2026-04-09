@@ -1,11 +1,1 @@
-{
-  "framework": "nextjs",
-  "functions": {
-    "app/api/extract/route.js": {
-      "maxDuration": 60
-    },
-    "app/api/proxy/route.js": {
-      "maxDuration": 60
-    }
-  }
-}
+{}

@@ -1,4 +1,5 @@
 export const runtime = 'edge';
+export const maxDuration = 60;
 
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
