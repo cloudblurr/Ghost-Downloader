@@ -2,9 +2,10 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 
 /* ── constants ── */
-const CONCURRENCY = 3;
-const MAX_RETRIES = 1;
+const CONCURRENCY = 6;
+const MAX_RETRIES = 2;
 const KEEPALIVE_MS = 15000;
+const DIRECT_DL_DELAY = 350; // ms between direct-download triggers
 
 const SITES = [
   'Erome', 'RedGifs', 'Twitter / X', 'Instagram', 'TikTok',
@@ -156,6 +157,7 @@ const FILE_STATUS = {
 export default function GhostPage() {
   const [tab, setTab] = useState('download');
   const [url, setUrl] = useState('');
+  const [dlMode, setDlMode] = useState('direct'); // 'direct' (fast, individual) | 'zip'
   const [status, setStatus] = useState('idle'); // idle | extracting | downloading | zipping | done | error
   const [files, setFiles] = useState([]); // [{ filename, status, size }]
   const [progress, setProgress] = useState(0);
@@ -165,6 +167,13 @@ export default function GhostPage() {
   const wakeLockRef = useRef(null);
   const keepaliveRef = useRef(null);
   const fileListRef = useRef(null);
+
+  /* ── Ghost Search state ── */
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchStatus, setSearchStatus] = useState('idle'); // idle | searching | done | error
+  const [searchResults, setSearchResults] = useState([]);
+  const [searchMeta, setSearchMeta] = useState(null); // { total, sources_searched, search_time_ms, parsed }
+  const [searchError, setSearchError] = useState('');
 
   /* auto-scroll file list */
   useEffect(() => {
@@ -258,13 +267,62 @@ export default function GhostPage() {
       const initFiles = data.media.map(m => ({ filename: m.filename, status: 'queued', size: null }));
       setFiles(initFiles);
 
-      /* download phase */
-      setStatus('downloading');
       const controller = new AbortController();
       abortRef.current = controller;
 
+      /* ── Direct download mode (fast, default) ── */
+      if (dlMode === 'direct') {
+        setStatus('downloading');
+        let completed = 0;
+        let failed = 0;
+
+        for (let i = 0; i < data.media.length; i++) {
+          if (controller.signal.aborted) break;
+
+          const item = data.media[i];
+          updateFile(i, { status: 'downloading' });
+
+          const params = new URLSearchParams({
+            url: item.url,
+            referer: data.referer || '',
+            auth: data.authHeader || '',
+            dl: '1',
+            filename: item.filename,
+          });
+
+          try {
+            const a = document.createElement('a');
+            a.href = '/api/proxy?' + params.toString();
+            a.download = item.filename;
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            completed++;
+            updateFile(i, { status: 'done' });
+          } catch {
+            failed++;
+            updateFile(i, { status: 'error' });
+          }
+
+          setProgress(Math.round(((completed + failed) / data.media.length) * 100));
+
+          // Small delay between triggers to prevent browser from blocking
+          if (i < data.media.length - 1) {
+            await new Promise(r => setTimeout(r, DIRECT_DL_DELAY));
+          }
+        }
+
+        setResult({ ok: completed, fail: failed });
+        setNotification(`Done — ${completed}/${data.media.length} files sent to browser`);
+        setStatus('done');
+        cleanup();
+        return;
+      }
+
+      /* ── ZIP download mode ── */
+      setStatus('downloading');
       let completed = 0;
-      const blobs = [];
 
       const results = await downloadParallel(data.media, CONCURRENCY, async (item, idx) => {
         if (controller.signal.aborted) return null;
@@ -349,6 +407,44 @@ export default function GhostPage() {
     if (wakeLockRef.current) { try { wakeLockRef.current.release(); } catch {} wakeLockRef.current = null; }
   }
 
+  async function handleSearch(e) {
+    if (e) e.preventDefault();
+    const q = searchQuery.trim();
+    if (!q) return;
+
+    setSearchStatus('searching');
+    setSearchResults([]);
+    setSearchMeta(null);
+    setSearchError('');
+
+    try {
+      const resp = await fetch('/api/ghost-search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: q, per_page: 30 }),
+      });
+      const data = await resp.json();
+
+      if (data.error) {
+        setSearchError(data.error);
+        setSearchStatus('error');
+        return;
+      }
+
+      setSearchResults(data.results || []);
+      setSearchMeta({
+        total: data.total,
+        sources_searched: data.sources_searched || [],
+        search_time_ms: data.search_time_ms,
+        parsed: data.parsed,
+      });
+      setSearchStatus('done');
+    } catch (err) {
+      setSearchError(err.message || 'Search failed');
+      setSearchStatus('error');
+    }
+  }
+
   function handleCancel() {
     if (abortRef.current) abortRef.current.abort();
   }
@@ -409,6 +505,41 @@ export default function GhostPage() {
               )}
             </form>
 
+            {/* ── Download mode toggle ── */}
+            <div style={{
+              display: 'flex', justifyContent: 'center', gap: 4, marginBottom: 16,
+              background: '#111115', borderRadius: 10, padding: 3, maxWidth: 320, margin: '0 auto 16px',
+            }}>
+              <button
+                type="button"
+                onClick={() => setDlMode('direct')}
+                disabled={working}
+                style={{
+                  flex: 1, padding: '7px 14px', borderRadius: 8, border: 'none', fontSize: '0.78rem',
+                  fontWeight: 600, cursor: working ? 'not-allowed' : 'pointer', transition: 'all 0.2s',
+                  color: dlMode === 'direct' ? '#e4e4e7' : '#52525b',
+                  background: dlMode === 'direct' ? '#1c1c28' : 'transparent',
+                  boxShadow: dlMode === 'direct' ? '0 1px 4px rgba(0,0,0,0.3)' : 'none',
+                }}
+              >
+                ⚡ Fast
+              </button>
+              <button
+                type="button"
+                onClick={() => setDlMode('zip')}
+                disabled={working}
+                style={{
+                  flex: 1, padding: '7px 14px', borderRadius: 8, border: 'none', fontSize: '0.78rem',
+                  fontWeight: 600, cursor: working ? 'not-allowed' : 'pointer', transition: 'all 0.2s',
+                  color: dlMode === 'zip' ? '#e4e4e7' : '#52525b',
+                  background: dlMode === 'zip' ? '#1c1c28' : 'transparent',
+                  boxShadow: dlMode === 'zip' ? '0 1px 4px rgba(0,0,0,0.3)' : 'none',
+                }}
+              >
+                📦 ZIP
+              </button>
+            </div>
+
             <div style={S.tags}>
               {SITES.map((s) => (
                 <span key={s} style={S.tag}>{s}</span>
@@ -432,7 +563,7 @@ export default function GhostPage() {
                   </span>
                   {status === 'downloading' && (
                     <span style={{ color: '#3f3f46', fontSize: '0.78rem' }}>
-                      {CONCURRENCY}x parallel
+                      {dlMode === 'direct' ? '⚡ direct' : `${CONCURRENCY}x parallel`}
                     </span>
                   )}
                 </div>
@@ -517,38 +648,224 @@ export default function GhostPage() {
 
         {/* ── Ghost Search Tab ── */}
         {tab === 'search' && (
-          <div className="fade-in" style={S.searchPanel}>
-            <div style={S.searchIcon}>🔍</div>
-            <div style={S.comingSoon}>COMING SOON</div>
-            <h2 style={{ fontSize: '1.3rem', fontWeight: 700, color: '#e4e4e7', marginBottom: 12 }}>
-              Ghost Search
-            </h2>
-            <p style={S.searchDesc}>
-              Search across multiple platforms simultaneously.
-              Find content by keyword, username, or tag — powered by Ghost.
-            </p>
-            <input
-              type="text"
-              placeholder="Search across platforms…"
-              disabled
-              style={S.searchInput}
-            />
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginTop: 24 }}>
-              {['Reddit', 'Erome', 'Twitter', 'Imgur', 'TikTok', 'More…'].map(p => (
-                <span key={p} style={{
-                  padding: '6px 14px', borderRadius: 8, fontSize: '0.75rem', fontWeight: 500,
-                  background: 'rgba(124, 58, 237, 0.08)', border: '1px solid rgba(124, 58, 237, 0.15)',
-                  color: '#71717a',
+          <div className="fade-in">
+            {/* Search bar */}
+            <form onSubmit={handleSearch} style={S.form}>
+              <input
+                type="text"
+                placeholder="Search across all platforms…"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                disabled={searchStatus === 'searching'}
+                autoFocus={tab === 'search'}
+                style={{ ...S.input, borderColor: searchStatus === 'error' ? '#ef4444' : undefined }}
+              />
+              <button
+                type="submit"
+                disabled={!searchQuery.trim() || searchStatus === 'searching'}
+                style={{
+                  ...S.btn,
+                  ...(!searchQuery.trim() || searchStatus === 'searching' ? S.btnDisabled : {}),
+                }}
+              >
+                {searchStatus === 'searching' ? '…' : 'Search'}
+              </button>
+            </form>
+
+            {/* Source tags */}
+            <div style={S.tags}>
+              {['Erome', 'RedGifs', 'Pornhub', 'XVideos', 'Stash', 'ThePornDB', 'Brave'].map((s) => (
+                <span key={s} style={{
+                  ...S.tag,
+                  ...(searchMeta?.sources_searched?.includes(s.toLowerCase()) ? {
+                    borderColor: 'rgba(124, 58, 237, 0.4)',
+                    color: '#a78bfa',
+                    background: 'rgba(124, 58, 237, 0.08)',
+                  } : {}),
                 }}>
-                  {p}
+                  {s}
                 </span>
               ))}
             </div>
+
+            {/* Searching indicator */}
+            {searchStatus === 'searching' && (
+              <div style={S.panel}>
+                <div style={{ textAlign: 'center', padding: '32px 0' }}>
+                  <div style={{
+                    width: 24, height: 24, border: '2.5px solid #27272a', borderTopColor: '#7c3aed',
+                    borderRadius: '50%', margin: '0 auto 16px', animation: 'spin 0.8s linear infinite',
+                  }} />
+                  <div style={{ color: '#71717a', fontSize: '0.85rem' }}>
+                    Searching across all sources…
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Error */}
+            {searchStatus === 'error' && (
+              <div style={{ ...S.panel, borderColor: 'rgba(239, 68, 68, 0.3)' }}>
+                <div style={{ color: '#ef4444', fontSize: '0.85rem', textAlign: 'center' }}>
+                  ✗ {searchError}
+                </div>
+              </div>
+            )}
+
+            {/* Results */}
+            {searchStatus === 'done' && (
+              <>
+                {/* Meta bar */}
+                <div style={{
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  marginBottom: 16, fontSize: '0.78rem', color: '#52525b',
+                }}>
+                  <span>{searchMeta?.total || 0} results from {searchMeta?.sources_searched?.length || 0} sources</span>
+                  <span>{searchMeta?.search_time_ms || 0}ms</span>
+                </div>
+
+                {/* Parsed query chips */}
+                {searchMeta?.parsed && (searchMeta.parsed.performers?.length > 0 || searchMeta.parsed.tags?.length > 0) && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 16 }}>
+                    {(searchMeta.parsed.performers || []).map(p => (
+                      <span key={p} style={{
+                        padding: '3px 10px', borderRadius: 6, fontSize: '0.72rem', fontWeight: 600,
+                        background: 'rgba(34, 197, 94, 0.1)', border: '1px solid rgba(34, 197, 94, 0.2)',
+                        color: '#22c55e',
+                      }}>
+                        👤 {p}
+                      </span>
+                    ))}
+                    {(searchMeta.parsed.tags || []).map(t => (
+                      <span key={t} style={{
+                        padding: '3px 10px', borderRadius: 6, fontSize: '0.72rem',
+                        background: 'rgba(124, 58, 237, 0.08)', border: '1px solid rgba(124, 58, 237, 0.15)',
+                        color: '#a78bfa',
+                      }}>
+                        {t}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                {/* Results grid */}
+                {searchResults.length > 0 ? (
+                  <div style={{
+                    display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
+                    gap: 12,
+                  }}>
+                    {searchResults.map((r) => (
+                      <a
+                        key={r.id}
+                        href={r.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{
+                          background: '#111115', border: '1px solid #1e1e2a', borderRadius: 12,
+                          overflow: 'hidden', textDecoration: 'none', color: '#e4e4e7',
+                          transition: 'border-color 0.2s, transform 0.15s',
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.borderColor = '#7c3aed';
+                          e.currentTarget.style.transform = 'translateY(-2px)';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.borderColor = '#1e1e2a';
+                          e.currentTarget.style.transform = 'translateY(0)';
+                        }}
+                      >
+                        {/* Thumbnail */}
+                        <div style={{
+                          width: '100%', height: 120, background: '#0a0a0f',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          position: 'relative', overflow: 'hidden',
+                        }}>
+                          {r.thumbnail ? (
+                            <img
+                              src={r.thumbnail}
+                              alt=""
+                              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                              loading="lazy"
+                            />
+                          ) : (
+                            <span style={{ color: '#27272a', fontSize: '2rem' }}>
+                              {r.media_type === 'video' ? '▶' : '◻'}
+                            </span>
+                          )}
+                          {/* Source badge */}
+                          <span style={{
+                            position: 'absolute', top: 6, left: 6, padding: '2px 8px',
+                            background: 'rgba(0,0,0,0.7)', borderRadius: 6,
+                            fontSize: '0.65rem', color: '#a1a1aa', fontWeight: 600,
+                            backdropFilter: 'blur(4px)',
+                          }}>
+                            {r.source}
+                          </span>
+                          {/* Duration badge */}
+                          {r.duration != null && (
+                            <span style={{
+                              position: 'absolute', bottom: 6, right: 6, padding: '2px 8px',
+                              background: 'rgba(0,0,0,0.7)', borderRadius: 6,
+                              fontSize: '0.65rem', color: '#e4e4e7', fontFamily: 'monospace',
+                              backdropFilter: 'blur(4px)',
+                            }}>
+                              {Math.floor(r.duration / 60)}:{String(r.duration % 60).padStart(2, '0')}
+                            </span>
+                          )}
+                        </div>
+                        {/* Info */}
+                        <div style={{ padding: '10px 12px' }}>
+                          <div style={{
+                            fontSize: '0.78rem', fontWeight: 500, lineHeight: 1.4,
+                            overflow: 'hidden', textOverflow: 'ellipsis',
+                            display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
+                          }}>
+                            {r.title}
+                          </div>
+                          <div style={{
+                            display: 'flex', gap: 8, marginTop: 6, fontSize: '0.68rem', color: '#52525b',
+                          }}>
+                            {r.views != null && <span>{r.views > 1000 ? (r.views / 1000).toFixed(0) + 'k' : r.views} views</span>}
+                            {r.relevance_score > 0 && (
+                              <span style={{
+                                color: r.relevance_score > 0.7 ? '#22c55e' : r.relevance_score > 0.4 ? '#a78bfa' : '#52525b',
+                              }}>
+                                {Math.round(r.relevance_score * 100)}% match
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </a>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{
+                    textAlign: 'center', padding: '40px 0', color: '#3f3f46', fontSize: '0.85rem',
+                  }}>
+                    No results found. Try different keywords.
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* Empty state */}
+            {searchStatus === 'idle' && (
+              <div style={{ ...S.panel, textAlign: 'center', padding: '48px 24px' }}>
+                <div style={{ fontSize: '2.5rem', marginBottom: 16, opacity: 0.2 }}>🔍</div>
+                <h3 style={{ fontSize: '1.1rem', fontWeight: 600, color: '#e4e4e7', marginBottom: 8 }}>
+                  Ghost Search
+                </h3>
+                <p style={{ color: '#52525b', fontSize: '0.82rem', lineHeight: 1.6, maxWidth: 360, margin: '0 auto' }}>
+                  AI-powered search across Erome, RedGifs, Pornhub, XVideos, Stash, ThePornDB, and Brave.
+                  Type naturally — Ghost understands performers, tags, and context.
+                </p>
+              </div>
+            )}
           </div>
         )}
 
         {/* ── Footer ── */}
-        <div style={S.footer}>Ghost v0.2.0</div>
+        <div style={S.footer}>Ghost v0.3.0</div>
       </div>
     </div>
   );
