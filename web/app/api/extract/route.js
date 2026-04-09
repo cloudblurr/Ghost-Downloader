@@ -4,7 +4,7 @@ import * as cheerio from 'cheerio';
 export const runtime = 'nodejs';
 export const maxDuration = 60;
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 
 function extFrom(u, fallback) {
   try {
@@ -16,6 +16,27 @@ function extFrom(u, fallback) {
 
 function sanitize(name) {
   return name.replace(/[<>:"/\\|?*\n\r\t]/g, '_').trim().substring(0, 200) || 'untitled';
+}
+
+const MEDIA_EXT = /\.(mp4|webm|mkv|mov|avi|m4v|flv|wmv|jpg|jpeg|png|gif|webp|bmp|svg|tiff)$/i;
+
+// ── Direct media URL ──
+function isDirectMedia(url) {
+  try {
+    const path = new URL(url.split('?')[0]).pathname;
+    return MEDIA_EXT.test(path);
+  } catch { return false; }
+}
+
+async function extractDirect(url) {
+  const filename = decodeURIComponent(new URL(url).pathname.split('/').pop()) || 'media_file';
+  const isVideo = /\.(mp4|webm|mkv|mov|avi|m4v|flv|wmv)$/i.test(filename);
+  return {
+    site: 'Direct URL',
+    title: sanitize(filename.replace(/\.\w+$/, '')),
+    referer: '',
+    media: [{ url, type: isVideo ? 'video' : 'image', filename }],
+  };
 }
 
 // ── Erome ──
@@ -130,27 +151,182 @@ async function extractCyberdrop(url) {
   return { site: 'Cyberdrop', title: sanitize(title), referer: url, media: [...urls].sort().map((u, i) => ({ url: u, type: /\.(mp4|webm|mkv|mov)/i.test(u) ? 'video' : 'image', filename: decodeURIComponent(new URL(u).pathname.split('/').pop()) || `file_${i + 1}` })) };
 }
 
+// ── Twitter / X ──
+async function extractTwitter(url) {
+  const match = url.match(/(?:twitter\.com|x\.com)\/.+\/status\/(\d+)/);
+  if (!match) throw new Error('Invalid Twitter/X URL');
+  const id = match[1];
+
+  // Use fxtwitter API for reliable extraction
+  const apiUrl = `https://api.fxtwitter.com/status/${id}`;
+  const resp = await fetch(apiUrl, { headers: { 'User-Agent': UA } });
+  if (!resp.ok) throw new Error('Failed to fetch tweet');
+  const data = await resp.json();
+
+  if (!data.tweet) throw new Error('Tweet not found');
+  const tweet = data.tweet;
+  const media = [];
+
+  if (tweet.media?.videos) {
+    tweet.media.videos.forEach((v, i) => {
+      const videoUrl = v.url;
+      if (videoUrl) media.push({ url: videoUrl, type: 'video', filename: `tweet_${id}_vid_${i + 1}.mp4` });
+    });
+  }
+
+  if (tweet.media?.photos) {
+    tweet.media.photos.forEach((p, i) => {
+      const photoUrl = p.url;
+      if (photoUrl) media.push({ url: photoUrl, type: 'image', filename: `tweet_${id}_img_${i + 1}${extFrom(photoUrl, '.jpg')}` });
+    });
+  }
+
+  // Fallback: single media fields
+  if (media.length === 0 && tweet.media?.all) {
+    tweet.media.all.forEach((m, i) => {
+      const u = m.url;
+      if (u) media.push({ url: u, type: m.type === 'video' ? 'video' : 'image', filename: `tweet_${id}_${i + 1}${extFrom(u, '.jpg')}` });
+    });
+  }
+
+  if (media.length === 0) throw new Error('No media found in tweet');
+
+  return { site: 'Twitter/X', title: `tweet_${id}`, referer: 'https://x.com/', media };
+}
+
+// ── Instagram ──
+async function extractInstagram(url) {
+  const match = url.match(/instagram\.com\/(?:p|reel|reels|tv)\/([A-Za-z0-9_-]+)/);
+  if (!match) throw new Error('Invalid Instagram URL — use a post, reel, or IGTV link');
+  const shortcode = match[1];
+
+  // Try fetching the page and extracting og: meta tags
+  const resp = await fetch(url, { headers: { 'User-Agent': UA }, redirect: 'follow' });
+  const html = await resp.text();
+  const $ = cheerio.load(html);
+  const media = [];
+
+  // Check og:video first (reels, video posts)
+  const ogVideo = $('meta[property="og:video"]').attr('content') || $('meta[property="og:video:url"]').attr('content');
+  if (ogVideo) {
+    media.push({ url: ogVideo, type: 'video', filename: `ig_${shortcode}.mp4` });
+  }
+
+  // Check og:image
+  const ogImage = $('meta[property="og:image"]').attr('content');
+  if (ogImage && media.length === 0) {
+    media.push({ url: ogImage, type: 'image', filename: `ig_${shortcode}.jpg` });
+  }
+
+  // Try to find media in embedded JSON
+  if (media.length === 0) {
+    const scripts = $('script[type="application/ld+json"]').toArray();
+    for (const s of scripts) {
+      try {
+        const json = JSON.parse($(s).html());
+        if (json.video?.contentUrl) media.push({ url: json.video.contentUrl, type: 'video', filename: `ig_${shortcode}.mp4` });
+        if (json.image && media.length === 0) {
+          const imgUrl = Array.isArray(json.image) ? json.image[0] : json.image;
+          if (typeof imgUrl === 'string') media.push({ url: imgUrl, type: 'image', filename: `ig_${shortcode}.jpg` });
+        }
+      } catch {}
+    }
+  }
+
+  if (media.length === 0) throw new Error('Could not extract Instagram media — the post may be private');
+
+  return { site: 'Instagram', title: `instagram_${shortcode}`, referer: 'https://www.instagram.com/', media };
+}
+
+// ── TikTok ──
+async function extractTikTok(url) {
+  // First resolve any short URLs
+  const resolved = await fetch(url, { headers: { 'User-Agent': UA }, redirect: 'follow' });
+  const finalUrl = resolved.url;
+  const html = await resolved.text();
+  const $ = cheerio.load(html);
+  const media = [];
+
+  // Extract video ID from final URL
+  const idMatch = finalUrl.match(/\/video\/(\d+)/) || finalUrl.match(/\/(\d+)/);
+  const videoId = idMatch ? idMatch[1] : 'tiktok';
+
+  // Check og:video
+  const ogVideo = $('meta[property="og:video"]').attr('content') || $('meta[property="og:video:url"]').attr('content');
+  if (ogVideo) {
+    media.push({ url: ogVideo, type: 'video', filename: `tiktok_${videoId}.mp4` });
+  }
+
+  // Check for video URLs in scripts
+  if (media.length === 0) {
+    const scriptContent = $('script#__UNIVERSAL_DATA_FOR_REHYDRATION__').html() ||
+                          $('script#SIGI_STATE').html() || '';
+    const videoUrls = scriptContent.match(/https?:\\?\/\\?\/[^"'\s]+\.mp4[^"'\s]*/g) || [];
+    const seen = new Set();
+    for (const raw of videoUrls) {
+      const cleaned = raw.replace(/\\u002F/g, '/').replace(/\\/g, '');
+      if (!seen.has(cleaned) && !cleaned.includes('music')) {
+        seen.add(cleaned);
+        media.push({ url: cleaned, type: 'video', filename: `tiktok_${videoId}.mp4` });
+        break; // just need one
+      }
+    }
+  }
+
+  // Fallback: og:image
+  if (media.length === 0) {
+    const ogImage = $('meta[property="og:image"]').attr('content');
+    if (ogImage) media.push({ url: ogImage, type: 'image', filename: `tiktok_${videoId}.jpg` });
+  }
+
+  if (media.length === 0) throw new Error('Could not extract TikTok media');
+
+  return { site: 'TikTok', title: `tiktok_${videoId}`, referer: 'https://www.tiktok.com/', media };
+}
+
 // ── Generic ──
 async function extractGeneric(url) {
   const html = await (await fetch(url, { headers: { 'User-Agent': UA } })).text();
   const $ = cheerio.load(html);
   const urls = new Set();
+
+  // og:video and og:image first
+  const ogVideo = $('meta[property="og:video"]').attr('content') || $('meta[property="og:video:url"]').attr('content');
+  if (ogVideo) urls.add(new URL(ogVideo, url).href);
+  const ogImage = $('meta[property="og:image"]').attr('content');
+  if (ogImage && /\.(jpg|jpeg|png|gif|webp)/i.test(ogImage)) urls.add(new URL(ogImage, url).href);
+
+  // Video elements
   $('video source[src]').each((_, el) => urls.add(new URL($(el).attr('src'), url).href));
   $('video[src]').each((_, el) => urls.add(new URL($(el).attr('src'), url).href));
-  $('img').each((_, el) => { const s = $(el).attr('data-src') || $(el).attr('src'); if (s && /\.(jpg|jpeg|png|gif|webp)/i.test(s)) urls.add(new URL(s, url).href); });
+
+  // Images (high quality only)
+  $('img').each((_, el) => {
+    const s = $(el).attr('data-src') || $(el).attr('src');
+    if (s && /\.(jpg|jpeg|png|gif|webp)/i.test(s)) {
+      try { urls.add(new URL(s, url).href); } catch {}
+    }
+  });
+
+  // Regex for video URLs in raw HTML
   (html.match(/https?:\/\/[^\s"'<>]+\.(?:mp4|webm|mkv|mov)/g) || []).forEach(u => urls.add(u));
+
   const host = new URL(url).hostname.replace('www.', '');
-  return { site: 'Generic', title: sanitize(host), referer: url, media: [...urls].sort().map((u, i) => ({ url: u, type: /\.(mp4|webm|mkv|mov)/i.test(u) ? 'video' : 'image', filename: decodeURIComponent(new URL(u).pathname.split('/').pop()) || `file_${i + 1}` })) };
+  return { site: 'Generic', title: sanitize(host), referer: url, media: [...urls].sort().map((u, i) => ({ url: u, type: /\.(mp4|webm|mkv|mov|avi|m4v|flv|wmv)/i.test(u) ? 'video' : 'image', filename: decodeURIComponent(new URL(u).pathname.split('/').pop()) || `file_${i + 1}` })) };
 }
 
 // ── Router ──
 function getExtractor(url) {
+  if (isDirectMedia(url)) return extractDirect;
   if (/erome\.com\/a\//.test(url)) return extractErome;
   if (/redgifs\.com\/(watch|ifr)\//.test(url)) return extractRedGifs;
   if (/redgifs\.com\/users\//.test(url)) return extractRedGifsUser;
   if (/imgur\.com/.test(url)) return extractImgur;
   if (/bunkr+\.\w+/.test(url)) return extractBunkr;
   if (/cyberdrop\.\w+\/a\//.test(url)) return extractCyberdrop;
+  if (/(?:twitter\.com|x\.com)\/.+\/status\//.test(url)) return extractTwitter;
+  if (/instagram\.com\/(?:p|reel|reels|tv)\//.test(url)) return extractInstagram;
+  if (/tiktok\.com/.test(url)) return extractTikTok;
   return extractGeneric;
 }
 
