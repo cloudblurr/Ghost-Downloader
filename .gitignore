@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.env
+
+# Node
+node_modules/
+.next/
+out/
+
+# Downloads
+downloads/
+tmp_downloads/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

@@ -1,0 +1,17 @@
+{
+  "name": "ghost-downloader",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "jszip": "^3.10.1",
+    "next": "^14.2.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0"
+  }
+}

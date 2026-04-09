@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ghost Downloader</title>
+    <style>
+        :root {
+            --bg: #0a0a0f;
+            --surface: #12121a;
+            --surface2: #1a1a26;
+            --border: #2a2a3a;
+            --accent: #7c3aed;
+            --accent-hover: #6d28d9;
+            --accent-glow: rgba(124, 58, 237, 0.3);
+            --green: #22c55e;
+            --red: #ef4444;
+            --yellow: #eab308;
+            --text: #e4e4e7;
+            --text-dim: #71717a;
+            --radius: 12px;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 640px;
+            padding: 20px;
+            margin-top: 60px;
+        }
+
+        .logo {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+        .logo h1 {
+            font-size: 2.2rem;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+            background: linear-gradient(135deg, #7c3aed, #a78bfa, #7c3aed);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .logo p {
+            color: var(--text-dim);
+            font-size: 0.85rem;
+            margin-top: 6px;
+        }
+
+        .input-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .input-group input {
+            flex: 1;
+            padding: 14px 18px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            color: var(--text);
+            font-size: 0.95rem;
+            outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        .input-group input:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-glow);
+        }
+        .input-group input::placeholder {
+            color: var(--text-dim);
+        }
+
+        .btn {
+            padding: 14px 28px;
+            background: var(--accent);
+            border: none;
+            border-radius: var(--radius);
+            color: white;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s, transform 0.1s;
+            white-space: nowrap;
+        }
+        .btn:hover { background: var(--accent-hover); }
+        .btn:active { transform: scale(0.97); }
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .sites {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            justify-content: center;
+            margin-bottom: 30px;
+        }
+        .sites span {
+            padding: 4px 12px;
+            background: var(--surface2);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            font-size: 0.75rem;
+            color: var(--text-dim);
+        }
+
+        /* Progress panel */
+        #progress-panel {
+            display: none;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 24px;
+            margin-bottom: 20px;
+        }
+        #progress-panel.active { display: block; }
+
+        .progress-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 14px;
+        }
+        .progress-header .site-badge {
+            padding: 3px 10px;
+            background: var(--accent);
+            border-radius: 6px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        .progress-header .status {
+            font-size: 0.85rem;
+            color: var(--text-dim);
+        }
+
+        .progress-bar-wrap {
+            width: 100%;
+            height: 6px;
+            background: var(--surface2);
+            border-radius: 3px;
+            overflow: hidden;
+            margin-bottom: 16px;
+        }
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, var(--accent), #a78bfa);
+            border-radius: 3px;
+            transition: width 0.3s ease;
+            width: 0%;
+        }
+
+        .log-box {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px 14px;
+            max-height: 240px;
+            overflow-y: auto;
+            font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+            font-size: 0.78rem;
+            line-height: 1.6;
+            color: var(--text-dim);
+        }
+        .log-box::-webkit-scrollbar { width: 4px; }
+        .log-box::-webkit-scrollbar-track { background: transparent; }
+        .log-box::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+        .log-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .log-line.info { color: #60a5fa; }
+        .log-line.found { color: var(--green); }
+        .log-line.dl { color: var(--text); }
+        .log-line.error { color: var(--red); }
+        .log-line.done { color: var(--green); font-weight: 600; }
+        .log-line.skip { color: var(--yellow); }
+
+        /* Download button */
+        .download-ready {
+            display: none;
+            text-align: center;
+            margin-top: 16px;
+        }
+        .download-ready.active { display: block; }
+        .btn-download {
+            padding: 14px 40px;
+            background: var(--green);
+            border: none;
+            border-radius: var(--radius);
+            color: var(--bg);
+            font-size: 1rem;
+            font-weight: 700;
+            cursor: pointer;
+            transition: opacity 0.2s, transform 0.1s;
+        }
+        .btn-download:hover { opacity: 0.9; }
+        .btn-download:active { transform: scale(0.97); }
+
+        .summary {
+            text-align: center;
+            margin-top: 10px;
+            font-size: 0.85rem;
+            color: var(--text-dim);
+        }
+        .summary .ok { color: var(--green); font-weight: 600; }
+        .summary .fail { color: var(--red); font-weight: 600; }
+
+        /* Spinner */
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255,255,255,0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        footer {
+            margin-top: auto;
+            padding: 30px;
+            text-align: center;
+            font-size: 0.75rem;
+            color: var(--text-dim);
+        }
+
+        @media (max-width: 480px) {
+            .container { margin-top: 30px; padding: 12px; }
+            .logo h1 { font-size: 1.6rem; }
+            .input-group { flex-direction: column; }
+            .btn { width: 100%; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">
+            <h1>👻 Ghost</h1>
+            <p>Paste a link. Get the media. Any device.</p>
+        </div>
+
+        <div class="input-group">
+            <input type="url" id="url-input" placeholder="Paste URL here..." autocomplete="off" autofocus>
+            <button class="btn" id="go-btn" onclick="startDownload()">Download</button>
+        </div>
+
+        <div class="sites">
+            <span>Erome</span>
+            <span>RedGifs</span>
+            <span>Imgur</span>
+            <span>Bunkr</span>
+            <span>Cyberdrop</span>
+            <span>Any URL</span>
+        </div>
+
+        <div id="progress-panel">
+            <div class="progress-header">
+                <span class="site-badge" id="site-badge">—</span>
+                <span class="status" id="status-text"><span class="spinner"></span>Starting...</span>
+            </div>
+            <div class="progress-bar-wrap">
+                <div class="progress-bar" id="progress-bar"></div>
+            </div>
+            <div class="log-box" id="log-box"></div>
+            <div class="download-ready" id="download-ready">
+                <button class="btn-download" id="dl-btn" onclick="downloadZip()">⬇ Download ZIP</button>
+                <div class="summary" id="summary"></div>
+            </div>
+        </div>
+    </div>
+
+    <footer>Ghost Downloader &mdash; runs on your server, downloads to your device.</footer>
+
+    <script>
+        const urlInput = document.getElementById('url-input');
+        const goBtn = document.getElementById('go-btn');
+        const panel = document.getElementById('progress-panel');
+        const bar = document.getElementById('progress-bar');
+        const logBox = document.getElementById('log-box');
+        const siteBadge = document.getElementById('site-badge');
+        const statusText = document.getElementById('status-text');
+        const downloadReady = document.getElementById('download-ready');
+        const dlBtn = document.getElementById('dl-btn');
+        const summary = document.getElementById('summary');
+
+        let currentJobId = null;
+        let evtSource = null;
+
+        urlInput.addEventListener('keydown', e => {
+            if (e.key === 'Enter') startDownload();
+        });
+
+        async function startDownload() {
+            const url = urlInput.value.trim();
+            if (!url) return;
+
+            // Reset UI
+            goBtn.disabled = true;
+            goBtn.innerHTML = '<span class="spinner"></span>Working...';
+            panel.classList.add('active');
+            downloadReady.classList.remove('active');
+            logBox.innerHTML = '';
+            bar.style.width = '0%';
+            siteBadge.textContent = '—';
+            statusText.innerHTML = '<span class="spinner"></span>Starting...';
+
+            if (evtSource) evtSource.close();
+
+            try {
+                const resp = await fetch('/api/download', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({url}),
+                });
+                const data = await resp.json();
+                if (data.error) {
+                    addLog('ERROR|' + data.error);
+                    reset();
+                    return;
+                }
+                currentJobId = data.job_id;
+                connectSSE(data.job_id);
+            } catch (e) {
+                addLog('ERROR|Network error: ' + e.message);
+                reset();
+            }
+        }
+
+        function connectSSE(jobId) {
+            evtSource = new EventSource('/api/stream/' + jobId);
+            evtSource.onmessage = function(e) {
+                const data = JSON.parse(e.data);
+
+                if (data.type === 'log') {
+                    addLog(data.msg);
+                    bar.style.width = Math.min(data.progress || 0, 100) + '%';
+
+                    // Update handler badge
+                    const parts = data.msg.split('|');
+                    if (parts[0] === 'INFO' && parts[1] && parts[1].startsWith('Detected site:')) {
+                        siteBadge.textContent = parts[1].replace('Detected site: ', '');
+                    }
+                    statusText.innerHTML = '<span class="spinner"></span>Downloading...';
+                }
+
+                if (data.type === 'done') {
+                    bar.style.width = '100%';
+                    statusText.textContent = '✓ Complete';
+                    statusText.style.color = '#22c55e';
+                    downloadReady.classList.add('active');
+                    summary.innerHTML = `<span class="ok">${data.success} downloaded</span>` +
+                        (data.failed > 0 ? ` · <span class="fail">${data.failed} failed</span>` : '');
+                    dlBtn.textContent = `⬇ Download ZIP (${data.zip_name || 'download.zip'})`;
+                    addLog('DONE|' + data.success + ' succeeded, ' + data.failed + ' failed');
+                    evtSource.close();
+                    reset();
+                }
+
+                if (data.type === 'error') {
+                    statusText.textContent = '✗ Error';
+                    statusText.style.color = '#ef4444';
+                    addLog('ERROR|Download failed');
+                    evtSource.close();
+                    reset();
+                }
+            };
+            evtSource.onerror = function() {
+                // Connection lost, fall back to polling
+                evtSource.close();
+                pollStatus(jobId);
+            };
+        }
+
+        async function pollStatus(jobId) {
+            while (true) {
+                try {
+                    const resp = await fetch('/api/status/' + jobId);
+                    const data = await resp.json();
+
+                    bar.style.width = Math.min(data.progress || 0, 100) + '%';
+
+                    if (data.handler) siteBadge.textContent = data.handler;
+
+                    if (data.status === 'done') {
+                        bar.style.width = '100%';
+                        statusText.textContent = '✓ Complete';
+                        statusText.style.color = '#22c55e';
+                        downloadReady.classList.add('active');
+                        summary.innerHTML = `<span class="ok">${data.success} downloaded</span>` +
+                            (data.failed > 0 ? ` · <span class="fail">${data.failed} failed</span>` : '');
+                        dlBtn.textContent = `⬇ Download ZIP`;
+                        reset();
+                        break;
+                    }
+                    if (data.status === 'error') {
+                        statusText.textContent = '✗ Error';
+                        statusText.style.color = '#ef4444';
+                        reset();
+                        break;
+                    }
+                } catch (e) { /* retry */ }
+                await new Promise(r => setTimeout(r, 1000));
+            }
+        }
+
+        function addLog(msg) {
+            const parts = msg.split('|');
+            const type = parts[0].toLowerCase();
+            const div = document.createElement('div');
+            div.className = 'log-line ' + type;
+
+            if (type === 'dl') {
+                div.textContent = `↓ ${parts[1] || ''} ${parts[2] ? '(' + parts[2] + ')' : ''}`;
+            } else if (type === 'found') {
+                div.textContent = `✦ Found: ${parts[1] || ''}`;
+            } else if (type === 'info') {
+                div.textContent = `● ${parts[1] || ''}`;
+            } else if (type === 'error') {
+                div.textContent = `✗ ${parts[1] || ''}`;
+            } else if (type === 'done') {
+                div.textContent = `✓ ${parts[1] || ''}`;
+            } else if (type === 'skip') {
+                div.textContent = `⊘ Skipped: ${parts[1] || ''}`;
+            } else {
+                div.textContent = msg;
+            }
+
+            logBox.appendChild(div);
+            logBox.scrollTop = logBox.scrollHeight;
+        }
+
+        function downloadZip() {
+            if (currentJobId) {
+                window.location.href = '/api/download/' + currentJobId + '/zip';
+            }
+        }
+
+        function reset() {
+            goBtn.disabled = false;
+            goBtn.textContent = 'Download';
+        }
+    </script>
+</body>
+</html>
