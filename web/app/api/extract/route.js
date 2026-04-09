@@ -31,6 +31,23 @@ function adjAnimal() {
   return `${a}-${b}`;
 }
 
+/* ── Verb-Animal unique name generator for videos ── */
+const VERBS = [
+  'dash','leap','soar','drift','surge','prowl','glide','spark','storm','blitz',
+  'roam','chase','climb','sweep','flash','crash','bloom','forge','reign','quest',
+  'rush','swirl','vault','hover','march','flare','scout','swing','reign','twist',
+  'bolt','lunge','stalk','whirl','plunge','coast','dive','trace','shift','pulse',
+  'weave','charm','strut','stomp','coast','morph','sway','clasp','nudge','slice',
+  'bound','flick','grasp','hover','joust','kneel','merge','orbit','prism','quake',
+];
+let _vidIdx = 0;
+function verbAnimal() {
+  const v = VERBS[_vidIdx % VERBS.length];
+  const a = ANIMALS[(_vidIdx + 7) % ANIMALS.length]; // offset to avoid same animal as image
+  _vidIdx++;
+  return `${v}-${a}`;
+}
+
 function extFrom(u, fallback) {
   try {
     const p = new URL(u.split('?')[0]).pathname;
@@ -91,7 +108,7 @@ async function extractErome(url) {
     site: 'Erome', title, referer: url,
     media: [
       ...[...images].sort().map((u) => ({ url: u, type: 'image', filename: `${adjAnimal()}${extFrom(u, '.jpg')}` })),
-      ...[...videos].sort().map((u, i) => ({ url: u, type: 'video', filename: `vid_${String(i + 1).padStart(3, '0')}${extFrom(u, '.mp4')}` })),
+      ...[...videos].sort().map((u) => ({ url: u, type: 'video', filename: `${verbAnimal()}${extFrom(u, '.mp4')}` })),
     ],
   };
 }
@@ -357,7 +374,7 @@ function getExtractor(url) {
 
 export async function POST(req) {
   try {
-    _nameIdx = 0; // reset per request
+    _nameIdx = 0; _vidIdx = 0; // reset per request
     const { url } = await req.json();
     if (!url || !/^https?:\/\//.test(url)) return NextResponse.json({ error: 'Invalid URL' }, { status: 400 });
     const result = await getExtractor(url)(url);
