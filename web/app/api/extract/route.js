@@ -2,9 +2,61 @@ import { NextResponse } from 'next/server';
 import * as cheerio from 'cheerio';
 
 export const runtime = 'nodejs';
-export const maxDuration = 60;
+export const maxDuration = 120;
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
+/* ── Rotating User Agents for bypass ── */
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:130.0) Gecko/20100101 Firefox/130.0',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0',
+];
+let _uaIdx = 0;
+function getUA() { return USER_AGENTS[_uaIdx++ % USER_AGENTS.length]; }
+const UA = USER_AGENTS[0];
+
+/* ── Browser-like headers for anti-bot bypass ── */
+function browserHeaders(referer = '', extra = {}) {
+  const ua = getUA();
+  return {
+    'User-Agent': ua,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': referer ? 'same-origin' : 'none',
+    'Sec-Fetch-User': '?1',
+    'Sec-Ch-Ua': '"Chromium";v="131", "Not_A Brand";v="24"',
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': '"Windows"',
+    ...(referer ? { 'Referer': referer } : {}),
+    ...extra,
+  };
+}
+
+/* ── Fetch with retry + UA rotation for bypass ── */
+async function fetchWithRetry(url, opts = {}, maxRetries = 2) {
+  let lastErr;
+  for (let i = 0; i <= maxRetries; i++) {
+    try {
+      const headers = { ...browserHeaders(opts.referer), ...opts.headers };
+      const resp = await fetch(url, { ...opts, headers, redirect: 'follow' });
+      if (resp.status === 403 || resp.status === 429 || resp.status === 503) {
+        // Wait and retry with different UA
+        if (i < maxRetries) { await new Promise(r => setTimeout(r, 1000 * (i + 1))); continue; }
+      }
+      return resp;
+    } catch (err) {
+      lastErr = err;
+      if (i < maxRetries) await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+    }
+  }
+  throw lastErr || new Error(`Failed to fetch ${url} after ${maxRetries + 1} attempts`);
+}
 
 /* ── Adjective-Animal unique name generator for images ── */
 const ADJECTIVES = [
@@ -83,7 +135,7 @@ async function extractDirect(url) {
 
 // ── Erome ──
 async function extractErome(url) {
-  const resp = await fetch(url, { headers: { 'User-Agent': UA, Referer: 'https://www.erome.com/' } });
+  const resp = await fetchWithRetry(url, { referer: 'https://www.erome.com/' });
   const html = await resp.text();
   const $ = cheerio.load(html);
   const title = $('h1').first().text().trim() || 'Erome Album';
@@ -118,8 +170,8 @@ async function extractRedGifs(url) {
   const match = url.match(/redgifs\.com\/(?:watch|ifr)\/([a-zA-Z0-9._-]+)/);
   if (!match) throw new Error('Invalid RedGifs URL');
   const id = match[1].split('#')[0].split('?')[0];
-  const { token } = await (await fetch('https://api.redgifs.com/v2/auth/temporary', { headers: { 'User-Agent': UA } })).json();
-  const { gif } = await (await fetch(`https://api.redgifs.com/v2/gifs/${id.toLowerCase()}`, { headers: { 'User-Agent': UA, Authorization: `Bearer ${token}` } })).json();
+  const { token } = await (await fetchWithRetry('https://api.redgifs.com/v2/auth/temporary')).json();
+  const { gif } = await (await fetchWithRetry(`https://api.redgifs.com/v2/gifs/${id.toLowerCase()}`, { headers: { Authorization: `Bearer ${token}` } })).json();
   const hdUrl = gif.urls?.hd || gif.urls?.sd || gif.urls?.gif;
   if (!hdUrl) throw new Error('No video URL found');
   return { site: 'RedGifs', title: `redgifs_${gif.userName || 'unknown'}`, referer: 'https://www.redgifs.com/', authHeader: `Bearer ${token}`, media: [{ url: hdUrl, type: 'video', filename: `${id}${extFrom(hdUrl, '.mp4')}` }] };
@@ -130,12 +182,12 @@ async function extractRedGifsUser(url) {
   const match = url.match(/redgifs\.com\/users\/([a-zA-Z0-9._-]+)/);
   if (!match) throw new Error('Invalid RedGifs user URL');
   const username = match[1].split('#')[0].split('?')[0];
-  const { token } = await (await fetch('https://api.redgifs.com/v2/auth/temporary', { headers: { 'User-Agent': UA } })).json();
-  const auth = { 'User-Agent': UA, Authorization: `Bearer ${token}` };
+  const { token } = await (await fetchWithRetry('https://api.redgifs.com/v2/auth/temporary')).json();
+  const auth = { Authorization: `Bearer ${token}` };
   const all = [];
   let page = 1;
   while (true) {
-    const data = await (await fetch(`https://api.redgifs.com/v2/users/${username.toLowerCase()}/search?page=${page}&count=80&order=new`, { headers: auth })).json();
+    const data = await (await fetchWithRetry(`https://api.redgifs.com/v2/users/${username.toLowerCase()}/search?page=${page}&count=80&order=new`, { headers: auth })).json();
     const gifs = data.gifs || [];
     if (gifs.length === 0) break;
     all.push(...gifs);
@@ -155,11 +207,11 @@ async function extractImgur(url) {
     const id = albumMatch[1];
     const urls = new Set();
     try {
-      const data = await (await fetch(`https://api.imgur.com/post/v1/albums/${id}?client_id=546c25a59c58ad7&include=media`, { headers: { 'User-Agent': UA } })).json();
+      const data = await (await fetchWithRetry(`https://api.imgur.com/post/v1/albums/${id}?client_id=546c25a59c58ad7&include=media`)).json();
       (data.media || []).forEach(m => { if (m.url) urls.add(m.url); });
     } catch {}
     if (urls.size === 0) {
-      const html = await (await fetch(url, { headers: { 'User-Agent': UA } })).text();
+      const html = await (await fetchWithRetry(url)).text();
       (html.match(/https?:\/\/i\.imgur\.com\/\w+\.\w{3,4}/g) || []).forEach(u => { if (!u.includes('removed')) urls.add(u); });
     }
     return { site: 'Imgur', title: `imgur_${id}`, referer: 'https://imgur.com/', media: [...urls].sort().map(u => ({ url: u, type: /\.mp4/i.test(u) ? 'video' : 'image', filename: new URL(u).pathname.split('/').pop() })) };
@@ -173,7 +225,7 @@ async function extractImgur(url) {
 
 // ── Bunkr ──
 async function extractBunkr(url) {
-  const html = await (await fetch(url, { headers: { 'User-Agent': UA } })).text();
+  const html = await (await fetchWithRetry(url)).text();
   const $ = cheerio.load(html);
   const title = $('h1').first().text().trim() || 'bunkr_album';
   const urls = new Set();
@@ -184,7 +236,7 @@ async function extractBunkr(url) {
 
 // ── Cyberdrop ──
 async function extractCyberdrop(url) {
-  const html = await (await fetch(url, { headers: { 'User-Agent': UA } })).text();
+  const html = await (await fetchWithRetry(url)).text();
   const $ = cheerio.load(html);
   const title = $('#title').text().trim() || 'cyberdrop';
   const urls = new Set();
@@ -201,7 +253,7 @@ async function extractTwitter(url) {
 
   // Use fxtwitter API for reliable extraction
   const apiUrl = `https://api.fxtwitter.com/status/${id}`;
-  const resp = await fetch(apiUrl, { headers: { 'User-Agent': UA } });
+  const resp = await fetchWithRetry(apiUrl);
   if (!resp.ok) throw new Error('Failed to fetch tweet');
   const data = await resp.json();
 
@@ -238,7 +290,7 @@ async function extractTwitter(url) {
 
 // ── ShesFreaky (single video page) ──
 async function extractShesFreaky(url) {
-  const resp = await fetch(url, { headers: { 'User-Agent': UA, Referer: 'https://www.shesfreaky.com/' } });
+  const resp = await fetchWithRetry(url, { referer: 'https://www.shesfreaky.com/' });
   const html = await resp.text();
   const $ = cheerio.load(html);
   const media = [];
@@ -276,7 +328,7 @@ async function extractShesFreaky(url) {
 
 // ── ShesFreaky directory / listing page ──
 async function extractShesFreakyDir(url) {
-  const resp = await fetch(url, { headers: { 'User-Agent': UA, Referer: 'https://www.shesfreaky.com/' } });
+  const resp = await fetchWithRetry(url, { referer: 'https://www.shesfreaky.com/' });
   const html = await resp.text();
   const $ = cheerio.load(html);
 
@@ -298,7 +350,7 @@ async function extractShesFreakyDir(url) {
   const results = await Promise.allSettled(
     links.map(async (vUrl) => {
       try {
-        const vResp = await fetch(vUrl, { headers: { 'User-Agent': UA, Referer: 'https://www.shesfreaky.com/' } });
+        const vResp = await fetchWithRetry(vUrl, { referer: 'https://www.shesfreaky.com/' });
         const vHtml = await vResp.text();
         const v$ = cheerio.load(vHtml);
         const vTitle = sanitize(v$('title').first().text().trim().replace(/\s*-\s*ShesFreaky$/i, '') || 'video');
@@ -330,7 +382,7 @@ async function extractInstagram(url) {
   // Strategy 1: Direct fetch with mobile UA (more likely to include og tags)
   const MOBILE_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
   try {
-    const resp = await fetch(url, { headers: { 'User-Agent': MOBILE_UA, Accept: 'text/html', 'Accept-Language': 'en-US,en;q=0.9' }, redirect: 'follow' });
+    const resp = await fetch(url, { headers: { 'User-Agent': MOBILE_UA, Accept: 'text/html', 'Accept-Language': 'en-US,en;q=0.9', 'Sec-Fetch-Dest': 'document', 'Sec-Fetch-Mode': 'navigate' }, redirect: 'follow' });
     const html = await resp.text();
     const $ = cheerio.load(html);
 
@@ -377,7 +429,7 @@ async function extractInstagram(url) {
   if (media.length === 0) {
     try {
       const embedUrl = `https://www.instagram.com/p/${shortcode}/embed/captioned/`;
-      const embedResp = await fetch(embedUrl, { headers: { 'User-Agent': UA, Accept: 'text/html' }, redirect: 'follow' });
+      const embedResp = await fetchWithRetry(embedUrl);
       const embedHtml = await embedResp.text();
       const e$ = cheerio.load(embedHtml);
 
@@ -420,7 +472,7 @@ async function extractInstagram(url) {
   if (media.length === 0) {
     try {
       const proxyUrl = url.replace('instagram.com', 'ddinstagram.com');
-      const proxyResp = await fetch(proxyUrl, { headers: { 'User-Agent': UA }, redirect: 'follow' });
+      const proxyResp = await fetchWithRetry(proxyUrl);
       const proxyHtml = await proxyResp.text();
       const p$ = cheerio.load(proxyHtml);
 
@@ -440,7 +492,7 @@ async function extractInstagram(url) {
 // ── TikTok ──
 async function extractTikTok(url) {
   // First resolve any short URLs
-  const resolved = await fetch(url, { headers: { 'User-Agent': UA }, redirect: 'follow' });
+  const resolved = await fetchWithRetry(url);
   const finalUrl = resolved.url;
   const html = await resolved.text();
   const $ = cheerio.load(html);
@@ -485,7 +537,7 @@ async function extractTikTok(url) {
 
 // ── Generic ──
 async function extractGeneric(url) {
-  const html = await (await fetch(url, { headers: { 'User-Agent': UA } })).text();
+  const html = await (await fetchWithRetry(url)).text();
   const $ = cheerio.load(html);
   const urls = new Set();
 
@@ -514,6 +566,287 @@ async function extractGeneric(url) {
   return { site: 'Generic', title: sanitize(host), referer: url, media: [...urls].sort().map((u) => ({ url: u, type: /\.(mp4|webm|mkv|mov|avi|m4v|flv|wmv)/i.test(u) ? 'video' : 'image', filename: decodeURIComponent(new URL(u).pathname.split('/').pop()) || `${adjAnimal()}${extFrom(u, '.bin')}` })) };
 }
 
+// ── Pornhub ──
+async function extractPornhub(url) {
+  const resp = await fetchWithRetry(url, { referer: 'https://www.pornhub.com/' });
+  const html = await resp.text();
+  const $ = cheerio.load(html);
+  const media = [];
+
+  const rawTitle = $('title').first().text().trim().replace(/\s*-\s*Pornhub\.com$/i, '') || 'Pornhub Video';
+  const title = sanitize(rawTitle);
+
+  // Strategy 1: Extract from flashvars_ / playerObjList / qualityItems JS
+  // PH embeds video URLs in JS variables
+  const qualityMap = {};
+
+  // Look for mediaDefinitions in the page JS
+  const mediaDefMatch = html.match(/var\s+flashvars_\d+\s*=\s*(\{[\s\S]*?\});/);
+  if (mediaDefMatch) {
+    try {
+      // Extract just the mediaDefinitions array
+      const mediaDefsStr = mediaDefMatch[1].match(/"mediaDefinitions"\s*:\s*(\[[\s\S]*?\])(?=\s*[,}])/);
+      if (mediaDefsStr) {
+        const defs = JSON.parse(mediaDefsStr[1]);
+        for (const def of defs) {
+          if (def.videoUrl && def.quality && def.format === 'mp4') {
+            qualityMap[def.quality] = def.videoUrl;
+          }
+        }
+      }
+    } catch {}
+  }
+
+  // Strategy 2: Look for direct quality URLs in JS
+  if (Object.keys(qualityMap).length === 0) {
+    const patterns = [
+      /quality_(\d+)p\s*=\s*['"](https?:[^'"]+)['"]/g,
+      /videoUrl['"]\s*:\s*['"](https?:[^'"]+)['"]/g,
+      /"quality"\s*:\s*"?(\d+)"?\s*,\s*"videoUrl"\s*:\s*"(https?:[^"]+)"/g,
+    ];
+    for (const pat of patterns) {
+      let m;
+      while ((m = pat.exec(html)) !== null) {
+        if (m[2] && m[2].startsWith('http')) {
+          qualityMap[m[1]] = m[2].replace(/\\/g, '');
+        }
+      }
+    }
+  }
+
+  // Strategy 3: Parse flashvars JSON more aggressively
+  if (Object.keys(qualityMap).length === 0) {
+    const allFlashvars = html.match(/flashvars_\d+\s*=\s*\{[^;]+/g) || [];
+    for (const fv of allFlashvars) {
+      const urlMatches = fv.match(/https?:\/\/[^\s"'\\]+\.mp4[^\s"'\\]*/g) || [];
+      for (const u of urlMatches) {
+        if (!qualityMap['auto']) qualityMap['auto'] = u;
+      }
+    }
+  }
+
+  // Strategy 4: mediaDefinitions with remote URL that returns actual video URLs
+  if (Object.keys(qualityMap).length === 0) {
+    const remoteMatch = html.match(/"mediaDefinitions"\s*:\s*\[[\s\S]*?\{"defaultQuality".*?"videoUrl"\s*:\s*"(https?:[^"]+)"[\s\S]*?\]/);
+    if (remoteMatch) {
+      try {
+        const remoteUrl = remoteMatch[1].replace(/\\/g, '');
+        const remoteResp = await fetchWithRetry(remoteUrl, { referer: url });
+        const remoteData = await remoteResp.json();
+        if (Array.isArray(remoteData)) {
+          for (const item of remoteData) {
+            if (item.videoUrl && item.quality) {
+              qualityMap[item.quality] = item.videoUrl;
+            }
+          }
+        }
+      } catch {}
+    }
+  }
+
+  // Pick best quality
+  const preferredQualities = ['1080', '720', '480', '360', '240', 'auto'];
+  let bestUrl = null;
+  let bestQuality = 'auto';
+  for (const q of preferredQualities) {
+    if (qualityMap[q]) { bestUrl = qualityMap[q]; bestQuality = q; break; }
+  }
+  // Fallback: pick any available
+  if (!bestUrl) { const entries = Object.entries(qualityMap); if (entries.length > 0) { bestUrl = entries[0][1]; bestQuality = entries[0][0]; } }
+
+  if (bestUrl) {
+    media.push({ url: bestUrl, type: 'video', filename: `${title}_${bestQuality}p.mp4` });
+  }
+
+  // Fallback: og:video
+  if (media.length === 0) {
+    const ogVideo = $('meta[property="og:video"]').attr('content') || $('meta[property="og:video:url"]').attr('content');
+    if (ogVideo) media.push({ url: ogVideo, type: 'video', filename: `${title}.mp4` });
+  }
+
+  // Fallback: any mp4 in HTML
+  if (media.length === 0) {
+    const mp4s = html.match(/https?:\/\/[^\s"'<>]+\.mp4[^\s"'<>]*/g) || [];
+    const seen = new Set();
+    for (const u of mp4s) {
+      const cleaned = u.replace(/['"\\]/g, '');
+      if (!seen.has(cleaned) && !cleaned.includes('preview') && !cleaned.includes('thumb')) {
+        seen.add(cleaned);
+        media.push({ url: cleaned, type: 'video', filename: `${title}.mp4` });
+        break;
+      }
+    }
+  }
+
+  if (media.length === 0) throw new Error('Could not extract Pornhub video — may require age verification or be geo-blocked');
+  return { site: 'Pornhub', title, referer: 'https://www.pornhub.com/', media };
+}
+
+// ── XVideos ──
+async function extractXvideos(url) {
+  const resp = await fetchWithRetry(url, { referer: 'https://www.xvideos.com/' });
+  const html = await resp.text();
+  const $ = cheerio.load(html);
+  const media = [];
+
+  const rawTitle = $('title').first().text().trim().replace(/\s*-\s*XVIDEOS\.COM$/i, '').replace(/\s*-\s*XVideos$/i, '') || 'XVideos Video';
+  const title = sanitize(rawTitle);
+
+  // Strategy 1: html5player.setVideoUrl* calls
+  const qualityMap = {};
+  const patterns = [
+    { re: /html5player\.setVideoUrlHigh\(\s*['"]([^'"]+)['"]\s*\)/, q: '720' },
+    { re: /html5player\.setVideoUrlLow\(\s*['"]([^'"]+)['"]\s*\)/, q: '360' },
+    { re: /html5player\.setVideoHLS\(\s*['"]([^'"]+)['"]\s*\)/, q: 'hls' },
+    { re: /html5player\.setVideoUrl1080p\(\s*['"]([^'"]+)['"]\s*\)/, q: '1080' },
+  ];
+  for (const { re, q } of patterns) {
+    const m = html.match(re);
+    if (m) qualityMap[q] = m[1];
+  }
+
+  // Strategy 2: setVideoUrl with quality param
+  const setVideoMatches = html.match(/html5player\.setVideoUrl\w+\(\s*['"]([^'"]+)['"]\s*\)/g) || [];
+  for (const svm of setVideoMatches) {
+    const m = svm.match(/setVideoUrl(\w+)\(\s*['"]([^'"]+)['"]\s*\)/);
+    if (m && m[2].startsWith('http')) {
+      qualityMap[m[1].toLowerCase()] = m[2];
+    }
+  }
+
+  // Pick best quality
+  const preferred = ['1080', '720', 'high', '480', '360', 'low', 'hls'];
+  let bestUrl = null;
+  for (const q of preferred) {
+    if (qualityMap[q]) { bestUrl = qualityMap[q]; break; }
+  }
+  if (!bestUrl) { const vals = Object.values(qualityMap); if (vals.length > 0) bestUrl = vals[0]; }
+
+  if (bestUrl && !bestUrl.includes('.m3u8')) {
+    media.push({ url: bestUrl, type: 'video', filename: `${title}.mp4` });
+  }
+
+  // Strategy 3: HLS fallback — extract m3u8 then use it directly
+  if (media.length === 0 && qualityMap['hls']) {
+    media.push({ url: qualityMap['hls'], type: 'video', filename: `${title}.mp4` });
+  }
+
+  // Fallback: og tags
+  if (media.length === 0) {
+    const ogVideo = $('meta[property="og:video"]').attr('content') || $('meta[property="og:video:url"]').attr('content');
+    if (ogVideo) media.push({ url: ogVideo, type: 'video', filename: `${title}.mp4` });
+  }
+
+  // Fallback: any mp4 in page
+  if (media.length === 0) {
+    const mp4s = html.match(/https?:\/\/[^\s"'<>]+\.mp4[^\s"'<>]*/g) || [];
+    for (const u of mp4s) {
+      if (!u.includes('thumb') && !u.includes('preview')) { media.push({ url: u.replace(/['"\\]/g, ''), type: 'video', filename: `${title}.mp4` }); break; }
+    }
+  }
+
+  if (media.length === 0) throw new Error('Could not extract XVideos video');
+  return { site: 'XVideos', title, referer: 'https://www.xvideos.com/', media };
+}
+
+// ── XHamster ──
+async function extractXhamster(url) {
+  const resp = await fetchWithRetry(url, { referer: 'https://xhamster.com/' });
+  const html = await resp.text();
+  const $ = cheerio.load(html);
+  const media = [];
+
+  const rawTitle = $('title').first().text().trim().replace(/\s*-\s*xHamster.*$/i, '') || 'xHamster Video';
+  const title = sanitize(rawTitle);
+
+  // Strategy 1: window.initials JSON block
+  const initialsMatch = html.match(/window\.initials\s*=\s*(\{[\s\S]*?\});\s*<\/script>/);
+  if (initialsMatch) {
+    try {
+      const initials = JSON.parse(initialsMatch[1]);
+      const videoModel = initials?.videoModel;
+      if (videoModel) {
+        const sources = videoModel.sources;
+        if (sources?.mp4) {
+          // sources.mp4 is an object like { "720p": { url: "..." }, "480p": ... }
+          const preferred = ['1080p', '720p', '480p', '360p', '240p'];
+          for (const q of preferred) {
+            if (sources.mp4[q]?.url) {
+              media.push({ url: sources.mp4[q].url, type: 'video', filename: `${title}_${q}.mp4` });
+              break;
+            }
+          }
+          // Fallback: pick any mp4 quality
+          if (media.length === 0) {
+            for (const [q, data] of Object.entries(sources.mp4)) {
+              if (data?.url) { media.push({ url: data.url, type: 'video', filename: `${title}_${q}.mp4` }); break; }
+            }
+          }
+        }
+        // HLS fallback
+        if (media.length === 0 && sources?.hls?.url) {
+          media.push({ url: sources.hls.url, type: 'video', filename: `${title}.mp4` });
+        }
+      }
+    } catch {}
+  }
+
+  // Strategy 2: JSON-LD
+  if (media.length === 0) {
+    $('script[type="application/ld+json"]').each((_, el) => {
+      if (media.length > 0) return;
+      try {
+        const json = JSON.parse($(el).html());
+        if (json.contentUrl) media.push({ url: json.contentUrl, type: 'video', filename: `${title}.mp4` });
+      } catch {}
+    });
+  }
+
+  // Strategy 3: script data-states or nextjs __NEXT_DATA__
+  if (media.length === 0) {
+    const nextData = html.match(/<script[^>]*id="__NEXT_DATA__"[^>]*>(\{[\s\S]*?\})<\/script>/);
+    if (nextData) {
+      try {
+        const nd = JSON.parse(nextData[1]);
+        const findVideoUrl = (obj) => {
+          if (!obj || typeof obj !== 'object') return null;
+          if (obj.mp4Url || obj.videoUrl) return obj.mp4Url || obj.videoUrl;
+          for (const v of Object.values(obj)) {
+            const found = findVideoUrl(v);
+            if (found) return found;
+          }
+          return null;
+        };
+        const vUrl = findVideoUrl(nd);
+        if (vUrl) media.push({ url: vUrl, type: 'video', filename: `${title}.mp4` });
+      } catch {}
+    }
+  }
+
+  // Strategy 4: mp4 URLs in raw HTML
+  if (media.length === 0) {
+    const mp4s = html.match(/https?:\/\/[^\s"'<>]+\.mp4[^\s"'<>]*/g) || [];
+    const seen = new Set();
+    for (const u of mp4s) {
+      const cleaned = u.replace(/['"\\]/g, '');
+      if (!seen.has(cleaned) && !cleaned.includes('thumb') && !cleaned.includes('preview') && !cleaned.includes('/p_')) {
+        seen.add(cleaned);
+        media.push({ url: cleaned, type: 'video', filename: `${title}.mp4` });
+        break;
+      }
+    }
+  }
+
+  // Fallback: og:video
+  if (media.length === 0) {
+    const ogVideo = $('meta[property="og:video"]').attr('content') || $('meta[property="og:video:url"]').attr('content');
+    if (ogVideo) media.push({ url: ogVideo, type: 'video', filename: `${title}.mp4` });
+  }
+
+  if (media.length === 0) throw new Error('Could not extract xHamster video');
+  return { site: 'xHamster', title, referer: 'https://xhamster.com/', media };
+}
+
 // ── Router ──
 function getExtractor(url) {
   if (isDirectMedia(url)) return extractDirect;
@@ -526,6 +859,9 @@ function getExtractor(url) {
   if (/(?:twitter\.com|x\.com)\/.+\/status\//.test(url)) return extractTwitter;
   if (/instagram\.com\/(?:p|reel|reels|tv|stories)\//.test(url)) return extractInstagram;
   if (/tiktok\.com/.test(url)) return extractTikTok;
+  if (/pornhub\.com\/view_video/.test(url)) return extractPornhub;
+  if (/xvideos\.com\/video/.test(url)) return extractXvideos;
+  if (/xhamster\.com\/videos\//.test(url)) return extractXhamster;
   if (/shesfreaky\.com\/video\//.test(url)) return extractShesFreaky;
   if (/shesfreaky\.com/.test(url)) return extractShesFreakyDir;
   return extractGeneric;
@@ -533,8 +869,31 @@ function getExtractor(url) {
 
 export async function POST(req) {
   try {
-    _nameIdx = 0; _vidIdx = 0; // reset per request
-    const { url } = await req.json();
+    _nameIdx = 0; _vidIdx = 0; _uaIdx = 0; // reset per request
+    const body = await req.json();
+
+    // Support single URL or array of URLs for bulk
+    if (body.urls && Array.isArray(body.urls)) {
+      // Bulk extraction: return array of results
+      const results = [];
+      for (const rawUrl of body.urls) {
+        const url = (rawUrl || '').trim();
+        if (!url || !/^https?:\/\//.test(url)) {
+          results.push({ url: rawUrl, error: 'Invalid URL' });
+          continue;
+        }
+        try {
+          const result = await getExtractor(url)(url);
+          results.push({ url, ...result });
+        } catch (err) {
+          results.push({ url, error: err.message || 'Extraction failed' });
+        }
+      }
+      return NextResponse.json({ bulk: true, results });
+    }
+
+    // Single URL (original behavior)
+    const { url } = body;
     if (!url || !/^https?:\/\//.test(url)) return NextResponse.json({ error: 'Invalid URL' }, { status: 400 });
     const result = await getExtractor(url)(url);
     return NextResponse.json(result);

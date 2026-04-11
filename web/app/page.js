@@ -9,7 +9,8 @@ const DIRECT_DL_DELAY = 350; // ms between direct-download triggers
 
 const SITES = [
   'Erome', 'RedGifs', 'Twitter / X', 'Instagram', 'TikTok',
-  'Imgur', 'Bunkr', 'Cyberdrop', 'Direct URLs',
+  'Imgur', 'Bunkr', 'Cyberdrop', 'Pornhub', 'XVideos', 'XHamster',
+  'ShesFreaky', 'Direct URLs',
 ];
 
 /* ── Wake Lock helper ── */
@@ -168,12 +169,20 @@ export default function GhostPage() {
   const keepaliveRef = useRef(null);
   const fileListRef = useRef(null);
 
+  /* ── Bulk queue state ── */
+  const [queue, setQueue] = useState([]); // [{ id, url, status: 'queued'|'extracting'|'downloading'|'done'|'error', fileCount, doneCount, failCount, notification }]
+  const queueProcessingRef = useRef(false);
+  const queueRef = useRef([]);
+
   /* ── Ghost Search state ── */
   const [searchQuery, setSearchQuery] = useState('');
   const [searchStatus, setSearchStatus] = useState('idle'); // idle | searching | done | error
   const [searchResults, setSearchResults] = useState([]);
   const [searchMeta, setSearchMeta] = useState(null); // { total, sources_searched, search_time_ms, parsed }
   const [searchError, setSearchError] = useState('');
+
+  /* Keep queueRef in sync */
+  useEffect(() => { queueRef.current = queue; }, [queue]);
 
   /* auto-scroll file list */
   useEffect(() => {
@@ -183,7 +192,7 @@ export default function GhostPage() {
   /* warn before leaving during download */
   useEffect(() => {
     const handler = (e) => {
-      if (status === 'downloading' || status === 'extracting' || status === 'zipping') {
+      if (status === 'downloading' || status === 'extracting' || status === 'zipping' || queueProcessingRef.current) {
         e.preventDefault();
         e.returnValue = '';
       }
@@ -219,11 +228,35 @@ export default function GhostPage() {
     });
   }, []);
 
-  async function handleSubmit(e) {
-    if (e) e.preventDefault();
-    const trimmed = url.trim();
-    if (!trimmed) return;
+  const updateQueueItem = useCallback((id, updates) => {
+    setQueue(prev => prev.map(q => q.id === id ? { ...q, ...updates } : q));
+  }, []);
 
+  /* ── Parse URLs from textarea (supports newlines, spaces, commas) ── */
+  function parseUrls(text) {
+    return text
+      .split(/[\n\r,]+/)
+      .map(u => u.trim())
+      .filter(u => /^https?:\/\//.test(u));
+  }
+
+  /* ── Process a single URL download (reused by both single & bulk) ── */
+  async function processOneUrl(targetUrl, controller, mode) {
+    // Extract
+    const resp = await fetch('/api/extract', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: targetUrl }),
+      signal: controller.signal,
+    });
+    const data = await resp.json();
+    if (data.error) throw new Error(data.error);
+    if (!data.media || data.media.length === 0) throw new Error('No media found');
+    return data;
+  }
+
+  /* ── Single URL download (original flow) ── */
+  async function handleSingleDownload(trimmed) {
     setStatus('extracting');
     setFiles([]);
     setProgress(0);
@@ -231,68 +264,33 @@ export default function GhostPage() {
     setNotification('Extracting media URLs…');
 
     try {
-      /* acquire wake lock */
       wakeLockRef.current = await acquireWakeLock();
-
-      /* start keepalive pings to prevent connection drops */
       keepaliveRef.current = setInterval(() => {
         fetch('/api/extract', { method: 'HEAD', keepalive: true }).catch(() => {});
       }, KEEPALIVE_MS);
 
-      /* extract */
-      const resp = await fetch('/api/extract', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: trimmed }),
-      });
-      const data = await resp.json();
-
-      if (data.error) {
-        setNotification(data.error);
-        setStatus('error');
-        cleanup();
-        return;
-      }
-
-      if (!data.media || data.media.length === 0) {
-        setNotification('No media found at this URL');
-        setStatus('error');
-        cleanup();
-        return;
-      }
-
-      setNotification(`${data.site} — found ${data.media.length} file(s)`);
-
-      /* build folder-safe title prefix for per-URL organization */
-      const folderName = (data.title || 'ghost_download').replace(/[<>:"/\\|?*\n\r\t]/g, '_').replace(/\s+/g, ' ').trim().substring(0, 100);
-
-      /* init file list */
-      const initFiles = data.media.map(m => ({ filename: m.filename, status: 'queued', size: null }));
-      setFiles(initFiles);
-
       const controller = new AbortController();
       abortRef.current = controller;
 
-      /* ── Direct download mode (fast, default) ── */
+      const data = await processOneUrl(trimmed, controller, dlMode);
+      setNotification(`${data.site} — found ${data.media.length} file(s)`);
+
+      const folderName = (data.title || 'ghost_download').replace(/[<>:"/\\|?*\n\r\t]/g, '_').replace(/\s+/g, ' ').trim().substring(0, 100);
+      const initFiles = data.media.map(m => ({ filename: m.filename, status: 'queued', size: null }));
+      setFiles(initFiles);
+
+      /* ── Direct download mode ── */
       if (dlMode === 'direct') {
         setStatus('downloading');
-        let completed = 0;
-        let failed = 0;
-
+        let completed = 0, failed = 0;
         for (let i = 0; i < data.media.length; i++) {
           if (controller.signal.aborted) break;
-
           const item = data.media[i];
           updateFile(i, { status: 'downloading' });
-
           const params = new URLSearchParams({
-            url: item.url,
-            referer: data.referer || '',
-            auth: data.authHeader || '',
-            dl: '1',
-            filename: `${folderName}_${item.filename}`,
+            url: item.url, referer: data.referer || '', auth: data.authHeader || '',
+            dl: '1', filename: `${folderName}_${item.filename}`,
           });
-
           try {
             const a = document.createElement('a');
             a.href = '/api/proxy?' + params.toString();
@@ -307,15 +305,9 @@ export default function GhostPage() {
             failed++;
             updateFile(i, { status: 'error' });
           }
-
           setProgress(Math.round(((completed + failed) / data.media.length) * 100));
-
-          // Small delay between triggers to prevent browser from blocking
-          if (i < data.media.length - 1) {
-            await new Promise(r => setTimeout(r, DIRECT_DL_DELAY));
-          }
+          if (i < data.media.length - 1) await new Promise(r => setTimeout(r, DIRECT_DL_DELAY));
         }
-
         setResult({ ok: completed, fail: failed });
         setNotification(`Done — ${completed}/${data.media.length} files sent to browser`);
         setStatus('done');
@@ -326,65 +318,37 @@ export default function GhostPage() {
       /* ── ZIP download mode ── */
       setStatus('downloading');
       let completed = 0;
-
       const results = await downloadParallel(data.media, CONCURRENCY, async (item, idx) => {
         if (controller.signal.aborted) return null;
-
         updateFile(idx, { status: 'downloading' });
-
         for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
           try {
-            const params = new URLSearchParams({
-              url: item.url,
-              referer: data.referer || '',
-              auth: data.authHeader || '',
-            });
-            const r = await fetch('/api/proxy?' + params.toString(), {
-              signal: controller.signal,
-            });
+            const params = new URLSearchParams({ url: item.url, referer: data.referer || '', auth: data.authHeader || '' });
+            const r = await fetch('/api/proxy?' + params.toString(), { signal: controller.signal });
             if (!r.ok) throw new Error('HTTP ' + r.status);
             const blob = await r.blob();
-            const size = blob.size;
             completed++;
             setProgress(Math.round((completed / data.media.length) * 100));
-            updateFile(idx, { status: 'done', size });
+            updateFile(idx, { status: 'done', size: blob.size });
             return { name: item.filename, blob };
           } catch (err) {
             if (err.name === 'AbortError') return null;
-            if (attempt === MAX_RETRIES) {
-              completed++;
-              setProgress(Math.round((completed / data.media.length) * 100));
-              updateFile(idx, { status: 'error' });
-              return null;
-            }
+            if (attempt === MAX_RETRIES) { completed++; setProgress(Math.round((completed / data.media.length) * 100)); updateFile(idx, { status: 'error' }); return null; }
           }
         }
         return null;
       }, controller.signal);
 
-      if (controller.signal.aborted) {
-        setNotification('Cancelled');
-        setStatus('idle');
-        cleanup();
-        return;
-      }
-
+      if (controller.signal.aborted) { setNotification('Cancelled'); setStatus('idle'); cleanup(); return; }
       const successBlobs = results.filter(Boolean);
 
-      /* zip phase */
       setStatus('zipping');
       setNotification('Creating ZIP archive…');
-
       const JSZip = (await import('jszip')).default;
       const zip = new JSZip();
       const folder = zip.folder(folderName);
       for (const b of successBlobs) folder.file(b.name, b.blob);
-
-      const zipBlob = await zip.generateAsync({
-        type: 'blob',
-        compression: 'DEFLATE',
-        compressionOptions: { level: 1 }, // fast compression
-      });
+      const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 1 } });
 
       const a = document.createElement('a');
       a.href = URL.createObjectURL(zipBlob);
@@ -403,6 +367,169 @@ export default function GhostPage() {
       setNotification(err.message);
       setStatus('error');
       cleanup();
+    }
+  }
+
+  /* ── Bulk queue download ── */
+  async function handleBulkDownload(urls) {
+    const newQueue = urls.map((u, i) => ({
+      id: Date.now() + '_' + i,
+      url: u,
+      status: 'queued',
+      fileCount: 0,
+      doneCount: 0,
+      failCount: 0,
+      notification: '',
+      site: '',
+    }));
+    setQueue(prev => [...prev, ...newQueue]);
+    setStatus('downloading');
+    setNotification(`Queued ${urls.length} link(s) for download`);
+
+    if (queueProcessingRef.current) return; // already processing
+    queueProcessingRef.current = true;
+
+    wakeLockRef.current = await acquireWakeLock();
+    keepaliveRef.current = setInterval(() => {
+      fetch('/api/extract', { method: 'HEAD', keepalive: true }).catch(() => {});
+    }, KEEPALIVE_MS);
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    // Process queue sequentially
+    const processQueue = async () => {
+      while (true) {
+        if (controller.signal.aborted) break;
+        // Find next queued item
+        const currentQueue = queueRef.current;
+        const next = currentQueue.find(q => q.status === 'queued');
+        if (!next) break;
+
+        const qId = next.id;
+        updateQueueItem(qId, { status: 'extracting', notification: 'Extracting…' });
+
+        try {
+          const data = await processOneUrl(next.url, controller, dlMode);
+          updateQueueItem(qId, {
+            status: 'downloading',
+            fileCount: data.media.length,
+            notification: `${data.site} — ${data.media.length} file(s)`,
+            site: data.site,
+          });
+
+          const folderName = (data.title || 'ghost_download').replace(/[<>:"/\\|?*\n\r\t]/g, '_').replace(/\s+/g, ' ').trim().substring(0, 100);
+          let doneCount = 0, failCount = 0;
+
+          if (dlMode === 'direct') {
+            for (let i = 0; i < data.media.length; i++) {
+              if (controller.signal.aborted) break;
+              const item = data.media[i];
+              const params = new URLSearchParams({
+                url: item.url, referer: data.referer || '', auth: data.authHeader || '',
+                dl: '1', filename: `${folderName}_${item.filename}`,
+              });
+              try {
+                const a = document.createElement('a');
+                a.href = '/api/proxy?' + params.toString();
+                a.download = `${folderName}_${item.filename}`;
+                a.style.display = 'none';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                doneCount++;
+              } catch {
+                failCount++;
+              }
+              updateQueueItem(qId, { doneCount, failCount });
+              if (i < data.media.length - 1) await new Promise(r => setTimeout(r, DIRECT_DL_DELAY));
+            }
+          } else {
+            // ZIP mode per URL
+            const results = await downloadParallel(data.media, CONCURRENCY, async (item) => {
+              if (controller.signal.aborted) return null;
+              for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+                try {
+                  const params = new URLSearchParams({ url: item.url, referer: data.referer || '', auth: data.authHeader || '' });
+                  const r = await fetch('/api/proxy?' + params.toString(), { signal: controller.signal });
+                  if (!r.ok) throw new Error('HTTP ' + r.status);
+                  const blob = await r.blob();
+                  doneCount++;
+                  updateQueueItem(qId, { doneCount });
+                  return { name: item.filename, blob };
+                } catch (err) {
+                  if (err.name === 'AbortError') return null;
+                  if (attempt === MAX_RETRIES) { failCount++; updateQueueItem(qId, { failCount }); return null; }
+                }
+              }
+              return null;
+            }, controller.signal);
+
+            const successBlobs = results.filter(Boolean);
+            if (successBlobs.length > 0) {
+              const JSZip = (await import('jszip')).default;
+              const zip = new JSZip();
+              const folder = zip.folder(folderName);
+              for (const b of successBlobs) folder.file(b.name, b.blob);
+              const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 1 } });
+              const a = document.createElement('a');
+              a.href = URL.createObjectURL(zipBlob);
+              a.download = folderName + '.zip';
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+              URL.revokeObjectURL(a.href);
+            }
+          }
+
+          updateQueueItem(qId, {
+            status: 'done',
+            doneCount, failCount,
+            notification: `Done — ${doneCount} downloaded${failCount > 0 ? `, ${failCount} failed` : ''}`,
+          });
+        } catch (err) {
+          if (controller.signal.aborted) {
+            updateQueueItem(qId, { status: 'error', notification: 'Cancelled' });
+            break;
+          }
+          updateQueueItem(qId, { status: 'error', notification: err.message || 'Failed' });
+        }
+
+        // Small delay between queue items
+        await new Promise(r => setTimeout(r, 500));
+      }
+
+      queueProcessingRef.current = false;
+      const finalQueue = queueRef.current;
+      const totalDone = finalQueue.filter(q => q.status === 'done').length;
+      const totalFail = finalQueue.filter(q => q.status === 'error').length;
+      setNotification(`Queue complete — ${totalDone} succeeded, ${totalFail} failed`);
+      setStatus('done');
+      cleanup();
+    };
+
+    processQueue();
+  }
+
+  async function handleSubmit(e) {
+    if (e) e.preventDefault();
+    const trimmed = url.trim();
+    if (!trimmed) return;
+
+    const urls = parseUrls(trimmed);
+    if (urls.length === 0) return;
+
+    setFiles([]);
+    setProgress(0);
+    setResult(null);
+
+    if (urls.length === 1) {
+      // Single URL: use original flow with file-level progress
+      handleSingleDownload(urls[0]);
+    } else {
+      // Bulk: queue all URLs
+      setUrl('');
+      handleBulkDownload(urls);
     }
   }
 
@@ -451,10 +578,12 @@ export default function GhostPage() {
 
   function handleCancel() {
     if (abortRef.current) abortRef.current.abort();
+    queueProcessingRef.current = false;
   }
 
   const working = status === 'extracting' || status === 'downloading' || status === 'zipping';
   const statusColor = status === 'done' ? '#22c55e' : status === 'error' ? '#ef4444' : '#a78bfa';
+  const parsedCount = parseUrls(url).length;
 
   return (
     <div style={S.page}>
@@ -462,7 +591,7 @@ export default function GhostPage() {
         {/* ── Header ── */}
         <div style={S.logo}>
           <h1 style={S.h1}>Ghost</h1>
-          <p style={S.sub}>Paste a link. Get the media. Any device.</p>
+          <p style={S.sub}>Paste links. Get the media. Any device.</p>
         </div>
 
         {/* ── Tabs ── */}
@@ -484,35 +613,59 @@ export default function GhostPage() {
         {/* ── Download Tab ── */}
         {tab === 'download' && (
           <div className="fade-in">
-            <form onSubmit={handleSubmit} style={S.form}>
-              <input
-                type="url"
-                placeholder="Paste any URL here…"
+            <form onSubmit={handleSubmit}>
+              {/* Textarea for bulk URLs */}
+              <textarea
+                placeholder={"Paste one or more URLs here…\nOne per line, or comma-separated"}
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
                 disabled={working}
                 autoFocus
-                style={S.input}
+                rows={url.includes('\n') || parsedCount > 1 ? 4 : 1}
+                style={{
+                  ...S.input,
+                  width: '100%',
+                  resize: 'vertical',
+                  minHeight: 50,
+                  maxHeight: 200,
+                  fontFamily: "'SF Mono','Cascadia Code','Fira Code',monospace",
+                  fontSize: '0.85rem',
+                  lineHeight: 1.6,
+                  marginBottom: 10,
+                }}
               />
-              {working ? (
-                <button type="button" onClick={handleCancel} style={S.btnCancel}>
-                  Cancel
-                </button>
-              ) : (
-                <button
-                  type="submit"
-                  disabled={!url.trim()}
-                  style={{ ...S.btn, ...(url.trim() ? {} : S.btnDisabled) }}
-                >
-                  Download
-                </button>
-              )}
+              <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                {/* URL count badge */}
+                {parsedCount > 1 && (
+                  <span style={{
+                    padding: '6px 14px', borderRadius: 8, fontSize: '0.78rem', fontWeight: 600,
+                    background: 'rgba(124, 58, 237, 0.1)', border: '1px solid rgba(124, 58, 237, 0.25)',
+                    color: '#a78bfa', whiteSpace: 'nowrap',
+                  }}>
+                    {parsedCount} links
+                  </span>
+                )}
+                <div style={{ flex: 1 }} />
+                {working ? (
+                  <button type="button" onClick={handleCancel} style={S.btnCancel}>
+                    Cancel
+                  </button>
+                ) : (
+                  <button
+                    type="submit"
+                    disabled={parsedCount === 0}
+                    style={{ ...S.btn, ...(parsedCount > 0 ? {} : S.btnDisabled) }}
+                  >
+                    {parsedCount > 1 ? `Download ${parsedCount} Links` : 'Download'}
+                  </button>
+                )}
+              </div>
             </form>
 
             {/* ── Download mode toggle ── */}
             <div style={{
-              display: 'flex', justifyContent: 'center', gap: 4, marginBottom: 16,
-              background: '#111115', borderRadius: 10, padding: 3, maxWidth: 320, margin: '0 auto 16px',
+              display: 'flex', justifyContent: 'center', gap: 4, marginTop: 12, marginBottom: 16,
+              background: '#111115', borderRadius: 10, padding: 3, maxWidth: 320, margin: '12px auto 16px',
             }}>
               <button
                 type="button"
@@ -550,8 +703,106 @@ export default function GhostPage() {
               ))}
             </div>
 
-            {/* ── Download Panel ── */}
-            {(status !== 'idle' || files.length > 0) && (
+            {/* ── Bulk Queue Panel ── */}
+            {queue.length > 0 && (
+              <div style={S.panel}>
+                <div style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  marginBottom: 16, fontSize: '0.85rem',
+                }}>
+                  <span style={{ color: '#a78bfa', fontWeight: 600 }}>
+                    Queue ({queue.filter(q => q.status === 'done').length}/{queue.length} complete)
+                  </span>
+                  {!working && queue.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setQueue([])}
+                      style={{
+                        padding: '4px 12px', borderRadius: 6, border: '1px solid #27272a',
+                        background: 'transparent', color: '#52525b', fontSize: '0.72rem',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+
+                {/* Queue progress bar */}
+                <div style={S.barWrap}>
+                  <div style={{
+                    ...S.bar,
+                    width: Math.round((queue.filter(q => q.status === 'done' || q.status === 'error').length / queue.length) * 100) + '%',
+                    ...(queue.every(q => q.status === 'done') ? { background: '#22c55e', animation: 'none' } : {}),
+                  }} />
+                </div>
+
+                {/* Queue items */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 400, overflowY: 'auto' }}>
+                  {queue.map((q) => {
+                    const qIcon = q.status === 'done' ? '✓' : q.status === 'error' ? '✗' : q.status === 'extracting' ? '◐' : q.status === 'downloading' ? '↓' : '·';
+                    const qColor = q.status === 'done' ? '#22c55e' : q.status === 'error' ? '#ef4444' : q.status === 'extracting' || q.status === 'downloading' ? '#60a5fa' : '#3f3f46';
+                    let domain = '';
+                    try { domain = new URL(q.url).hostname.replace('www.', ''); } catch {}
+                    const qProgress = q.fileCount > 0 ? Math.round(((q.doneCount + q.failCount) / q.fileCount) * 100) : 0;
+
+                    return (
+                      <div key={q.id} style={{
+                        padding: '10px 14px', borderRadius: 10,
+                        background: q.status === 'downloading' ? 'rgba(96, 165, 250, 0.04)' : q.status === 'extracting' ? 'rgba(124, 58, 237, 0.04)' : 'rgba(255,255,255,0.01)',
+                        border: '1px solid #1a1a24',
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+                          <span style={{
+                            color: qColor, fontWeight: 700, fontSize: '0.85rem', width: 16, textAlign: 'center',
+                            ...(q.status === 'downloading' || q.status === 'extracting' ? { animation: 'pulse 1s infinite' } : {}),
+                          }}>
+                            {qIcon}
+                          </span>
+                          <span style={{
+                            flex: 1, fontSize: '0.78rem', color: '#a1a1aa', overflow: 'hidden',
+                            textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                            fontFamily: "'SF Mono','Cascadia Code','Fira Code',monospace",
+                          }}>
+                            {domain}
+                          </span>
+                          {q.site && (
+                            <span style={{
+                              padding: '2px 8px', borderRadius: 6, fontSize: '0.65rem',
+                              background: 'rgba(124, 58, 237, 0.1)', color: '#a78bfa', fontWeight: 600,
+                            }}>
+                              {q.site}
+                            </span>
+                          )}
+                          {q.fileCount > 0 && (
+                            <span style={{ fontSize: '0.72rem', color: '#52525b' }}>
+                              {q.doneCount}/{q.fileCount}
+                            </span>
+                          )}
+                        </div>
+                        {/* Per-item progress bar */}
+                        {(q.status === 'downloading' || q.status === 'done') && q.fileCount > 0 && (
+                          <div style={{ ...S.barWrap, height: 3, marginBottom: 4, marginTop: 6 }}>
+                            <div style={{
+                              height: '100%', borderRadius: 2, transition: 'width 0.4s ease',
+                              background: q.status === 'done' ? '#22c55e' : 'linear-gradient(90deg, #7c3aed, #a78bfa)',
+                              width: qProgress + '%',
+                            }} />
+                          </div>
+                        )}
+                        {q.notification && (
+                          <div style={{ fontSize: '0.72rem', color: '#52525b', marginTop: 2, paddingLeft: 26 }}>
+                            {q.notification}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+            {/* ── Single URL Download Panel (file-level detail) ── */}
+            {queue.length === 0 && (status !== 'idle' || files.length > 0) && (
               <div style={S.panel}>
                 {/* status line */}
                 <div style={{
@@ -869,7 +1120,7 @@ export default function GhostPage() {
         )}
 
         {/* ── Footer ── */}
-        <div style={S.footer}>Ghost v0.3.0</div>
+        <div style={S.footer}>Ghost v0.4.0</div>
       </div>
     </div>
   );

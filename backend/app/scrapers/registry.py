@@ -10,6 +10,7 @@ from app.scrapers.erome import EromeScraper
 from app.scrapers.redgifs import RedGifsScraper
 from app.scrapers.pornhub import PornhubScraper
 from app.scrapers.xvideos import XVideosScraper
+from app.scrapers.xhamster import XHamsterScraper
 from app.scrapers.shesfreaky import ShesFreakyScraper
 from app.scrapers.stash import StashScraper, ThePornDBScraper
 from app.scrapers.brave import BraveSearchScraper
@@ -29,6 +30,7 @@ class ScraperRegistry:
             RedGifsScraper,
             PornhubScraper,
             XVideosScraper,
+            XHamsterScraper,
             ShesFreakyScraper,
             StashScraper,
             ThePornDBScraper,
